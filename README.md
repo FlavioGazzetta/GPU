@@ -1,4 +1,4 @@
-# tiny-gpu
+# gpu-extended-from-tiny
 
 A minimal GPU implementation in Verilog optimized for learning about how GPUs work from the ground up.
 
@@ -6,20 +6,41 @@ Built with <15 files of fully documented Verilog, complete documentation on arch
 
 ### Table of Contents
 
+- [gpu-extended-from-tiny](#gpu-extended-from-tiny)
+    - [Table of Contents](#table-of-contents)
 - [Overview](#overview)
+  - [What is tiny-gpu?](#what-is-tiny-gpu)
 - [Architecture](#architecture)
   - [GPU](#gpu)
+    - [Device Control Register](#device-control-register)
+    - [Dispatcher](#dispatcher)
   - [Memory](#memory)
+    - [Global Memory](#global-memory)
+    - [Memory Controllers](#memory-controllers)
+    - [Cache (WIP)](#cache-wip)
   - [Core](#core)
+    - [Scheduler](#scheduler)
+    - [Fetcher](#fetcher)
+    - [Decoder](#decoder)
+    - [Register Files](#register-files)
+    - [ALUs](#alus)
+    - [LSUs](#lsus)
+    - [PCs](#pcs)
 - [ISA](#isa)
 - [Execution](#execution)
-  - [Core](#core-1)
-  - [Thread](#thread)
+    - [Core](#core-1)
+    - [Thread](#thread)
 - [Kernels](#kernels)
-  - [Matrix Addition](#matrix-addition)
-  - [Matrix Multiplication](/tree/master?tab=readme-ov-file#matrix-multiplication)
+    - [Matrix Addition](#matrix-addition)
+    - [Matrix Multiplication](#matrix-multiplication)
 - [Simulation](#simulation)
 - [Advanced Functionality](#advanced-functionality)
+    - [Multi-layered Cache \& Shared Memory](#multi-layered-cache--shared-memory)
+    - [Memory Coalescing](#memory-coalescing)
+    - [Pipelining](#pipelining)
+    - [Warp Scheduling](#warp-scheduling)
+    - [Branch Divergence](#branch-divergence)
+    - [Synchronization \& Barriers](#synchronization--barriers)
 - [Next Steps](#next-steps)
 
 # Overview

@@ -8,49 +8,49 @@
 // > The NZP register value is set by the CMP instruction (based on >/=/< comparison) to 
 //   initiate the BRnzp instruction for branching
 module pc #(
-    parameter DATA_MEM_DATA_BITS = 8,
-    parameter PROGRAM_MEM_ADDR_BITS = 8
+    parameter int DATA_MEM_DATA_BITS     = 8,
+    parameter int PROGRAM_MEM_ADDR_BITS  = 8
 ) (
-    input wire clk,
-    input wire reset,
-    input wire enable, // If current block has less threads then block size, some PCs will be inactive
+    input  logic clk,
+    input  logic reset,
+    input  logic enable, // If current block has less threads then block size, some PCs will be inactive
 
     // State
-    input reg [2:0] core_state,
+    input  logic [2:0]                          core_state,
 
     // Control Signals
-    input reg [2:0] decoded_nzp,
-    input reg [DATA_MEM_DATA_BITS-1:0] decoded_immediate,
-    input reg decoded_nzp_write_enable,
-    input reg decoded_pc_mux, 
+    input  logic [2:0]                          decoded_nzp,
+    input  logic [DATA_MEM_DATA_BITS-1:0]       decoded_immediate,
+    input  logic                                 decoded_nzp_write_enable,
+    input  logic                                 decoded_pc_mux, 
 
     // ALU Output - used for alu_out[2:0] to compare with NZP register
-    input reg [DATA_MEM_DATA_BITS-1:0] alu_out,
+    input  logic [DATA_MEM_DATA_BITS-1:0]       alu_out,
 
     // Current & Next PCs
-    input reg [PROGRAM_MEM_ADDR_BITS-1:0] current_pc,
-    output reg [PROGRAM_MEM_ADDR_BITS-1:0] next_pc
+    input  logic [PROGRAM_MEM_ADDR_BITS-1:0]    current_pc,
+    output logic [PROGRAM_MEM_ADDR_BITS-1:0]    next_pc
 );
-    reg [2:0] nzp;
+    logic [2:0] nzp;
 
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (reset) begin
-            nzp <= 3'b0;
-            next_pc <= 0;
+            nzp     <= 3'b000;
+            next_pc <= '0;
         end else if (enable) begin
             // Update PC when core_state = EXECUTE
             if (core_state == 3'b101) begin 
-                if (decoded_pc_mux == 1) begin 
-                    if (((nzp & decoded_nzp) != 3'b0)) begin 
+                if (decoded_pc_mux == 1'b1) begin 
+                    if ((nzp & decoded_nzp) != 3'b000) begin 
                         // On BRnzp instruction, branch to immediate if NZP case matches previous CMP
-                        next_pc <= decoded_immediate;
+                        next_pc <= decoded_immediate; // (implicit truncation if widths differ, same as original)
                     end else begin 
                         // Otherwise, just update to PC + 1 (next line)
-                        next_pc <= current_pc + 1;
+                        next_pc <= current_pc + 1'b1;
                     end
                 end else begin 
                     // By default update to PC + 1 (next line)
-                    next_pc <= current_pc + 1;
+                    next_pc <= current_pc + 1'b1;
                 end
             end   
 
@@ -65,5 +65,4 @@ module pc #(
             end      
         end
     end
-
 endmodule

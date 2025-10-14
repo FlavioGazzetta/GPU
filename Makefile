@@ -1,25 +1,80 @@
-.PHONY: test compile
+# ============================================================
+# Tiny-GPU Makefile — proper DEBUG_LOG toggle + ARGS support
+# ============================================================
 
-export LIBPYTHON_LOC=$(shell cocotb-config --libpython)
+TOP_MODULE  = gpu
+EXE_NAME    = V$(TOP_MODULE)
+OBJ_DIR     = obj_dir
 
-test_%:
-	make compile
-	iverilog -o build/sim.vvp -s gpu -g2012 build/gpu.v
-	MODULE=test.test_$* vvp -M $$(cocotb-config --prefix)/cocotb/libs -m libcocotbvpi_icarus build/sim.vvp
+SRC_SV = \
+  src/alu.sv \
+  src/controller.sv \
+  src/core.sv \
+  src/dcr.sv \
+  src/decoder.sv \
+  src/dispatch.sv \
+  src/fetcher.sv \
+  src/lsu.sv \
+  src/pc.sv \
+  src/registers.sv \
+  src/scheduler.sv \
+  src/gpu.sv
 
-compile:
-	make compile_alu
-	sv2v -I src/* -w build/gpu.v
-	echo "" >> build/gpu.v
-	cat build/alu.v >> build/gpu.v
-	echo '`timescale 1ns/1ns' > build/temp.v
-	cat build/gpu.v >> build/temp.v
-	mv build/temp.v build/gpu.v
+SRC_CPP = cpp/sim_main.cpp
 
-compile_%:
-	sv2v -w build/$*.v src/$*.sv
+# ----- Debug toggle -----
+# Use: make run            (DEBUG=1 default)
+#      make run-nodebug    (DEBUG=0)
+#      make run DEBUG=0
+DEBUG ?= 1
 
-# TODO: Get gtkwave visualizaiton
+ifeq ($(DEBUG),1)
+  DEBUG_DEF   = -DDEBUG_LOG
+  LOG_STATUS  = DEBUG_LOG enabled
+else
+  DEBUG_DEF   =
+  LOG_STATUS  = DEBUG_LOG DISABLED
+endif
 
-show_%: %.vcd %.gtkw
-	gtkwave $^
+# ----- Custom run arguments -----
+# Usage example:
+#   make run ARGS="+test=matmul5x5"
+ARGS ?=
+
+# ----- Tool flags -----
+CXXFLAGS = -std=c++17 -O3 $(DEBUG_DEF)
+LDFLAGS  = -O3
+
+VERILATOR_FLAGS = \
+  --sv --cc --exe --build \
+  -Wall -Wno-fatal -Wno-UNOPTFLAT \
+  --trace --trace-structs \
+  $(DEBUG_DEF) \
+  -CFLAGS "$(CXXFLAGS)" \
+  -LDFLAGS "$(LDFLAGS)" \
+  -top-module $(TOP_MODULE)
+
+# ----- Targets -----
+.PHONY: all run run-debug run-nodebug clean
+
+all: run
+
+run:
+	@echo "🚀 Building and running $(TOP_MODULE) with $(LOG_STATUS)..."
+	verilator $(VERILATOR_FLAGS) $(SRC_SV) $(SRC_CPP)
+	@echo ""
+	@echo "------------------------------------------"
+	@echo "Running simulation:"
+	@echo "------------------------------------------"
+	./$(OBJ_DIR)/$(EXE_NAME) $(ARGS)
+
+# Convenience shortcuts
+run-debug:
+	$(MAKE) run DEBUG=1
+
+run-nodebug:
+	$(MAKE) run DEBUG=0
+
+clean:
+	@echo "🧹 Cleaning build directory..."
+	rm -rf $(OBJ_DIR) *.vcd *.fst *.log

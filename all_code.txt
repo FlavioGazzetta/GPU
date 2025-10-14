@@ -1,8 +1,8 @@
 # Combined source code dump
-# Generated on Mon Oct 13 07:02:14 BST 2025
+# Generated on Tue Oct 14 20:10:48 BST 2025
 
 ====================================================================
->>> File: ./src/alu.sv
+>>> File: src/alu.sv
 ====================================================================
 
 `default_nettype none
@@ -14,51 +14,44 @@
 // > Each thread in each core has it's own ALU
 // > ADD, SUB, MUL, DIV instructions are all executed here
 module alu (
-    input wire clk,
-    input wire reset,
-    input wire enable, // If current block has less threads then block size, some ALUs will be inactive
+    input  logic        clk,
+    input  logic        reset,
+    input  logic        enable, // If current block has less threads then block size, some ALUs will be inactive
 
-    input reg [2:0] core_state,
+    input  logic [2:0]  core_state,
 
-    input reg [1:0] decoded_alu_arithmetic_mux,
-    input reg decoded_alu_output_mux,
+    input  logic [1:0]  decoded_alu_arithmetic_mux,
+    input  logic        decoded_alu_output_mux,
 
-    input reg [7:0] rs,
-    input reg [7:0] rt,
-    output wire [7:0] alu_out
+    input  logic [7:0]  rs,
+    input  logic [7:0]  rt,
+    output logic [7:0]  alu_out
 );
-    localparam ADD = 2'b00,
-        SUB = 2'b01,
-        MUL = 2'b10,
-        DIV = 2'b11;
+    localparam logic [1:0] ADD = 2'b00,
+                           SUB = 2'b01,
+                           MUL = 2'b10,
+                           DIV = 2'b11;
 
-    reg [7:0] alu_out_reg;
-    assign alu_out = alu_out_reg;
-
-    always @(posedge clk) begin 
-        if (reset) begin 
-            alu_out_reg <= 8'b0;
+    // Sequential update, identical behavior to original
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            alu_out <= 8'b0;
         end else if (enable) begin
             // Calculate alu_out when core_state = EXECUTE
-            if (core_state == 3'b101) begin 
-                if (decoded_alu_output_mux == 1) begin 
-                    // Set values to compare with NZP register in alu_out[2:0]
-                    alu_out_reg <= {5'b0, (rs - rt > 0), (rs - rt == 0), (rs - rt < 0)};
-                end else begin 
+            if (core_state == 3'b101) begin
+                if (decoded_alu_output_mux == 1'b1) begin
+                    // Signed compare for CMP → NZP in alu_out[2:0]
+                    logic signed [8:0] diff;
+                    diff = $signed({1'b0, rs}) - $signed({1'b0, rt});
+                    alu_out <= {5'b0, (diff > 0), (diff == 0), (diff < 0)};
+                end else begin
                     // Execute the specified arithmetic instruction
                     case (decoded_alu_arithmetic_mux)
-                        ADD: begin 
-                            alu_out_reg <= rs + rt;
-                        end
-                        SUB: begin 
-                            alu_out_reg <= rs - rt;
-                        end
-                        MUL: begin 
-                            alu_out_reg <= rs * rt;
-                        end
-                        DIV: begin 
-                            alu_out_reg <= rs / rt;
-                        end
+                        ADD: alu_out <= rs + rt;
+                        SUB: alu_out <= rs - rt;
+                        MUL: alu_out <= rs * rt;
+                        DIV: alu_out <= rs / rt;
+                        default: alu_out <= alu_out; // hold value (no behavior change)
                     endcase
                 end
             end
@@ -68,7 +61,7 @@ endmodule
 
 
 ====================================================================
->>> File: ./src/controller.sv
+>>> File: src/controller.sv
 ====================================================================
 
 `default_nettype none
@@ -79,124 +72,130 @@ endmodule
 // > Throttles requests based on limited external memory bandwidth
 // > Waits for responses from external memory and distributes them back to cores
 module controller #(
-    parameter ADDR_BITS = 8,
-    parameter DATA_BITS = 16,
-    parameter NUM_CONSUMERS = 4, // The number of consumers accessing memory through this controller
-    parameter NUM_CHANNELS = 1,  // The number of concurrent channels available to send requests to global memory
-    parameter WRITE_ENABLE = 1   // Whether this memory controller can write to memory (program memory is read-only)
+    parameter int ADDR_BITS     = 8,
+    parameter int DATA_BITS     = 16,
+    parameter int NUM_CONSUMERS = 4, // The number of consumers accessing memory through this controller
+    parameter int NUM_CHANNELS  = 1, // The number of concurrent channels available to send requests to global memory
+    parameter bit WRITE_ENABLE  = 1  // Whether this memory controller can write to memory (program memory is read-only)
 ) (
-    input wire clk,
-    input wire reset,
+    input  logic clk,
+    input  logic reset,
 
     // Consumer Interface (Fetchers / LSUs)
-    input reg [NUM_CONSUMERS-1:0] consumer_read_valid,
-    input reg [ADDR_BITS-1:0] consumer_read_address [NUM_CONSUMERS-1:0],
-    output reg [NUM_CONSUMERS-1:0] consumer_read_ready,
-    output reg [DATA_BITS-1:0] consumer_read_data [NUM_CONSUMERS-1:0],
-    input reg [NUM_CONSUMERS-1:0] consumer_write_valid,
-    input reg [ADDR_BITS-1:0] consumer_write_address [NUM_CONSUMERS-1:0],
-    input reg [DATA_BITS-1:0] consumer_write_data [NUM_CONSUMERS-1:0],
-    output reg [NUM_CONSUMERS-1:0] consumer_write_ready,
+    input  logic [NUM_CONSUMERS-1:0]                        consumer_read_valid,
+    input  logic [ADDR_BITS-1:0]                            consumer_read_address [NUM_CONSUMERS],
+    output logic [NUM_CONSUMERS-1:0]                        consumer_read_ready,
+    output logic [DATA_BITS-1:0]                            consumer_read_data   [NUM_CONSUMERS],
+    input  logic [NUM_CONSUMERS-1:0]                        consumer_write_valid,
+    input  logic [ADDR_BITS-1:0]                            consumer_write_address[NUM_CONSUMERS],
+    input  logic [DATA_BITS-1:0]                            consumer_write_data  [NUM_CONSUMERS],
+    output logic [NUM_CONSUMERS-1:0]                        consumer_write_ready,
 
     // Memory Interface (Data / Program)
-    output reg [NUM_CHANNELS-1:0] mem_read_valid,
-    output reg [ADDR_BITS-1:0] mem_read_address [NUM_CHANNELS-1:0],
-    input reg [NUM_CHANNELS-1:0] mem_read_ready,
-    input reg [DATA_BITS-1:0] mem_read_data [NUM_CHANNELS-1:0],
-    output reg [NUM_CHANNELS-1:0] mem_write_valid,
-    output reg [ADDR_BITS-1:0] mem_write_address [NUM_CHANNELS-1:0],
-    output reg [DATA_BITS-1:0] mem_write_data [NUM_CHANNELS-1:0],
-    input reg [NUM_CHANNELS-1:0] mem_write_ready
+    output logic [NUM_CHANNELS-1:0]                         mem_read_valid,
+    output logic [ADDR_BITS-1:0]                            mem_read_address [NUM_CHANNELS],
+    input  logic [NUM_CHANNELS-1:0]                         mem_read_ready,
+    input  logic [DATA_BITS-1:0]                            mem_read_data   [NUM_CHANNELS],
+    output logic [NUM_CHANNELS-1:0]                         mem_write_valid,
+    output logic [ADDR_BITS-1:0]                            mem_write_address[NUM_CHANNELS],
+    output logic [DATA_BITS-1:0]                            mem_write_data  [NUM_CHANNELS],
+    input  logic [NUM_CHANNELS-1:0]                         mem_write_ready
 );
-    localparam IDLE = 3'b000, 
-        READ_WAITING = 3'b010, 
-        WRITE_WAITING = 3'b011,
-        READ_RELAYING = 3'b100,
-        WRITE_RELAYING = 3'b101;
+    localparam logic [2:0] IDLE          = 3'b000,
+                           READ_WAITING  = 3'b010,
+                           WRITE_WAITING = 3'b011,
+                           READ_RELAYING = 3'b100,
+                           WRITE_RELAYING= 3'b101;
 
     // Keep track of state for each channel and which jobs each channel is handling
-    reg [2:0] controller_state [NUM_CHANNELS-1:0];
-    reg [$clog2(NUM_CONSUMERS)-1:0] current_consumer [NUM_CHANNELS-1:0]; // Which consumer is each channel currently serving
-    reg [NUM_CONSUMERS-1:0] channel_serving_consumer; // Which channels are being served? Prevents many workers from picking up the same request.
+    logic [2:0] controller_state [NUM_CHANNELS];
+    logic [$clog2(NUM_CONSUMERS)-1:0] current_consumer [NUM_CHANNELS]; // Which consumer is each channel currently serving
+    logic [NUM_CONSUMERS-1:0]         channel_serving_consumer;        // Which consumers are being served (one channel each)
 
-    always @(posedge clk) begin
-        if (reset) begin 
-            mem_read_valid <= 0;
-            mem_read_address <= 0;
+    // Sequential logic only; no behavior changes
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            mem_read_valid  <= '0;
+            mem_write_valid <= '0;
+            consumer_read_ready  <= '0;
+            consumer_write_ready <= '0;
+            channel_serving_consumer <= '0;
 
-            mem_write_valid <= 0;
-            mem_write_address <= 0;
-            mem_write_data <= 0;
+            // Zero unpacked arrays with foreach (required for SV/Verilator)
+            foreach (mem_read_address[i])   mem_read_address[i]   <= '0;
+            foreach (mem_write_address[i])  mem_write_address[i]  <= '0;
+            foreach (mem_write_data[i])     mem_write_data[i]     <= '0;
+            foreach (consumer_read_data[i]) consumer_read_data[i] <= '0;
 
-            consumer_read_ready <= 0;
-            consumer_read_data <= 0;
-            consumer_write_ready <= 0;
-
-            current_consumer <= 0;
-            controller_state <= 0;
-
-            channel_serving_consumer = 0;
-        end else begin 
+            foreach (current_consumer[i])   current_consumer[i]   <= '0;
+            foreach (controller_state[i])   controller_state[i]   <= '0; // IDLE == 3'b000
+        end else begin
             // For each channel, we handle processing concurrently
-            for (int i = 0; i < NUM_CHANNELS; i = i + 1) begin 
-                case (controller_state[i])
+            for (int i = 0; i < NUM_CHANNELS; i++) begin
+                unique case (controller_state[i])
                     IDLE: begin
                         // While this channel is idle, cycle through consumers looking for one with a pending request
-                        for (int j = 0; j < NUM_CONSUMERS; j = j + 1) begin 
-                            if (consumer_read_valid[j] && !channel_serving_consumer[j]) begin 
-                                channel_serving_consumer[j] = 1;
-                                current_consumer[i] <= j;
+                        for (int j = 0; j < NUM_CONSUMERS; j++) begin
+                            if (consumer_read_valid[j] && !channel_serving_consumer[j]) begin
+                                channel_serving_consumer[j] <= 1'b1;
+                                // width-safe cast of loop index
+                                current_consumer[i]         <= $bits(current_consumer[i])'(j);
 
-                                mem_read_valid[i] <= 1;
-                                mem_read_address[i] <= consumer_read_address[j];
-                                controller_state[i] <= READ_WAITING;
+                                mem_read_valid[i]           <= 1'b1;
+                                mem_read_address[i]         <= consumer_read_address[j];
+                                controller_state[i]         <= READ_WAITING;
 
                                 // Once we find a pending request, pick it up with this channel and stop looking for requests
                                 break;
-                            end else if (consumer_write_valid[j] && !channel_serving_consumer[j]) begin 
-                                channel_serving_consumer[j] = 1;
-                                current_consumer[i] <= j;
+                            end else if (consumer_write_valid[j] && !channel_serving_consumer[j]) begin
+                                channel_serving_consumer[j] <= 1'b1;
+                                // width-safe cast of loop index
+                                current_consumer[i]         <= $bits(current_consumer[i])'(j);
 
-                                mem_write_valid[i] <= 1;
-                                mem_write_address[i] <= consumer_write_address[j];
-                                mem_write_data[i] <= consumer_write_data[j];
-                                controller_state[i] <= WRITE_WAITING;
+                                mem_write_valid[i]          <= 1'b1;
+                                mem_write_address[i]        <= consumer_write_address[j];
+                                mem_write_data[i]           <= consumer_write_data[j];
+                                controller_state[i]         <= WRITE_WAITING;
 
                                 // Once we find a pending request, pick it up with this channel and stop looking for requests
                                 break;
                             end
                         end
                     end
+
                     READ_WAITING: begin
                         // Wait for response from memory for pending read request
-                        if (mem_read_ready[i]) begin 
-                            mem_read_valid[i] <= 0;
-                            consumer_read_ready[current_consumer[i]] <= 1;
-                            consumer_read_data[current_consumer[i]] <= mem_read_data[i];
-                            controller_state[i] <= READ_RELAYING;
+                        if (mem_read_ready[i]) begin
+                            mem_read_valid[i]                          <= 1'b0;
+                            consumer_read_ready[current_consumer[i]]   <= 1'b1;
+                            consumer_read_data[current_consumer[i]]    <= mem_read_data[i];
+                            controller_state[i]                        <= READ_RELAYING;
                         end
                     end
-                    WRITE_WAITING: begin 
+
+                    WRITE_WAITING: begin
                         // Wait for response from memory for pending write request
-                        if (mem_write_ready[i]) begin 
-                            mem_write_valid[i] <= 0;
-                            consumer_write_ready[current_consumer[i]] <= 1;
-                            controller_state[i] <= WRITE_RELAYING;
+                        if (mem_write_ready[i]) begin
+                            mem_write_valid[i]                         <= 1'b0;
+                            consumer_write_ready[current_consumer[i]]  <= 1'b1;
+                            controller_state[i]                        <= WRITE_RELAYING;
                         end
                     end
+
                     // Wait until consumer acknowledges it received response, then reset
                     READ_RELAYING: begin
-                        if (!consumer_read_valid[current_consumer[i]]) begin 
-                            channel_serving_consumer[current_consumer[i]] = 0;
-                            consumer_read_ready[current_consumer[i]] <= 0;
-                            controller_state[i] <= IDLE;
+                        if (!consumer_read_valid[current_consumer[i]]) begin
+                            channel_serving_consumer[current_consumer[i]] <= 1'b0;
+                            consumer_read_ready[current_consumer[i]]      <= 1'b0;
+                            controller_state[i]                           <= IDLE;
                         end
                     end
-                    WRITE_RELAYING: begin 
-                        if (!consumer_write_valid[current_consumer[i]]) begin 
-                            channel_serving_consumer[current_consumer[i]] = 0;
-                            consumer_write_ready[current_consumer[i]] <= 0;
-                            controller_state[i] <= IDLE;
+
+                    WRITE_RELAYING: begin
+                        if (!consumer_write_valid[current_consumer[i]]) begin
+                            channel_serving_consumer[current_consumer[i]] <= 1'b0;
+                            consumer_write_ready[current_consumer[i]]      <= 1'b0;
+                            controller_state[i]                            <= IDLE;
                         end
                     end
                 endcase
@@ -207,7 +206,7 @@ endmodule
 
 
 ====================================================================
->>> File: ./src/core.sv
+>>> File: src/core.sv
 ====================================================================
 
 `default_nettype none
@@ -218,70 +217,70 @@ endmodule
 // > The core also has it's own scheduler to manage control flow
 // > Each core contains 1 fetcher & decoder, and register files, ALUs, LSUs, PC for each thread
 module core #(
-    parameter DATA_MEM_ADDR_BITS = 8,
-    parameter DATA_MEM_DATA_BITS = 8,
-    parameter PROGRAM_MEM_ADDR_BITS = 8,
-    parameter PROGRAM_MEM_DATA_BITS = 16,
-    parameter THREADS_PER_BLOCK = 4
+    parameter int DATA_MEM_ADDR_BITS     = 8,
+    parameter int DATA_MEM_DATA_BITS     = 8,
+    parameter int PROGRAM_MEM_ADDR_BITS  = 8,
+    parameter int PROGRAM_MEM_DATA_BITS  = 16,
+    parameter int THREADS_PER_BLOCK      = 4
 ) (
-    input wire clk,
-    input wire reset,
+    input  logic clk,
+    input  logic reset,
 
     // Kernel Execution
-    input wire start,
-    output wire done,
+    input  logic start,
+    output logic done,
 
     // Block Metadata
-    input wire [7:0] block_id,
-    input wire [$clog2(THREADS_PER_BLOCK):0] thread_count,
+    input  logic [7:0] block_id,
+    input  logic [$clog2(THREADS_PER_BLOCK):0] thread_count,
 
     // Program Memory
-    output reg program_mem_read_valid,
-    output reg [PROGRAM_MEM_ADDR_BITS-1:0] program_mem_read_address,
-    input reg program_mem_read_ready,
-    input reg [PROGRAM_MEM_DATA_BITS-1:0] program_mem_read_data,
+    output logic                             program_mem_read_valid,
+    output logic [PROGRAM_MEM_ADDR_BITS-1:0] program_mem_read_address,
+    input  logic                             program_mem_read_ready,
+    input  logic [PROGRAM_MEM_DATA_BITS-1:0] program_mem_read_data,
 
     // Data Memory
-    output reg [THREADS_PER_BLOCK-1:0] data_mem_read_valid,
-    output reg [DATA_MEM_ADDR_BITS-1:0] data_mem_read_address [THREADS_PER_BLOCK-1:0],
-    input reg [THREADS_PER_BLOCK-1:0] data_mem_read_ready,
-    input reg [DATA_MEM_DATA_BITS-1:0] data_mem_read_data [THREADS_PER_BLOCK-1:0],
-    output reg [THREADS_PER_BLOCK-1:0] data_mem_write_valid,
-    output reg [DATA_MEM_ADDR_BITS-1:0] data_mem_write_address [THREADS_PER_BLOCK-1:0],
-    output reg [DATA_MEM_DATA_BITS-1:0] data_mem_write_data [THREADS_PER_BLOCK-1:0],
-    input reg [THREADS_PER_BLOCK-1:0] data_mem_write_ready
+    output logic [THREADS_PER_BLOCK-1:0]                       data_mem_read_valid,
+    output logic [DATA_MEM_ADDR_BITS-1:0]                      data_mem_read_address [THREADS_PER_BLOCK],
+    input  logic [THREADS_PER_BLOCK-1:0]                       data_mem_read_ready,
+    input  logic [DATA_MEM_DATA_BITS-1:0]                      data_mem_read_data   [THREADS_PER_BLOCK],
+    output logic [THREADS_PER_BLOCK-1:0]                       data_mem_write_valid,
+    output logic [DATA_MEM_ADDR_BITS-1:0]                      data_mem_write_address[THREADS_PER_BLOCK],
+    output logic [DATA_MEM_DATA_BITS-1:0]                      data_mem_write_data  [THREADS_PER_BLOCK],
+    input  logic [THREADS_PER_BLOCK-1:0]                       data_mem_write_ready
 );
     // State
-    reg [2:0] core_state;
-    reg [2:0] fetcher_state;
-    reg [15:0] instruction;
+    logic [2:0]  core_state;
+    logic [2:0]  fetcher_state;
+    logic [15:0] instruction;
 
     // Intermediate Signals
-    reg [7:0] current_pc;
-    wire [7:0] next_pc[THREADS_PER_BLOCK-1:0];
-    reg [7:0] rs[THREADS_PER_BLOCK-1:0];
-    reg [7:0] rt[THREADS_PER_BLOCK-1:0];
-    reg [1:0] lsu_state[THREADS_PER_BLOCK-1:0];
-    reg [7:0] lsu_out[THREADS_PER_BLOCK-1:0];
-    wire [7:0] alu_out[THREADS_PER_BLOCK-1:0];
+    logic [7:0] current_pc;
+    logic [7:0] next_pc [THREADS_PER_BLOCK];
+    logic [7:0] rs      [THREADS_PER_BLOCK];
+    logic [7:0] rt      [THREADS_PER_BLOCK];
+    logic [1:0] lsu_state [THREADS_PER_BLOCK];
+    logic [7:0] lsu_out   [THREADS_PER_BLOCK];
+    logic [7:0] alu_out   [THREADS_PER_BLOCK];
     
     // Decoded Instruction Signals
-    reg [3:0] decoded_rd_address;
-    reg [3:0] decoded_rs_address;
-    reg [3:0] decoded_rt_address;
-    reg [2:0] decoded_nzp;
-    reg [7:0] decoded_immediate;
+    logic [3:0] decoded_rd_address;
+    logic [3:0] decoded_rs_address;
+    logic [3:0] decoded_rt_address;
+    logic [2:0] decoded_nzp;
+    logic [7:0] decoded_immediate;
 
     // Decoded Control Signals
-    reg decoded_reg_write_enable;           // Enable writing to a register
-    reg decoded_mem_read_enable;            // Enable reading from memory
-    reg decoded_mem_write_enable;           // Enable writing to memory
-    reg decoded_nzp_write_enable;           // Enable writing to NZP register
-    reg [1:0] decoded_reg_input_mux;        // Select input to register
-    reg [1:0] decoded_alu_arithmetic_mux;   // Select arithmetic operation
-    reg decoded_alu_output_mux;             // Select operation in ALU
-    reg decoded_pc_mux;                     // Select source of next PC
-    reg decoded_ret;
+    logic       decoded_reg_write_enable;         // Enable writing to a register
+    logic       decoded_mem_read_enable;          // Enable reading from memory
+    logic       decoded_mem_write_enable;         // Enable writing to memory
+    logic       decoded_nzp_write_enable;         // Enable writing to NZP register
+    logic [1:0] decoded_reg_input_mux;            // Select input to register
+    logic [1:0] decoded_alu_arithmetic_mux;       // Select arithmetic operation
+    logic       decoded_alu_output_mux;           // Select operation in ALU
+    logic       decoded_pc_mux;                   // Select source of next PC
+    logic       decoded_ret;
 
     // Fetcher
     fetcher #(
@@ -324,7 +323,7 @@ module core #(
 
     // Scheduler
     scheduler #(
-        .THREADS_PER_BLOCK(THREADS_PER_BLOCK),
+        .THREADS_PER_BLOCK(THREADS_PER_BLOCK)
     ) scheduler_instance (
         .clk(clk),
         .reset(reset),
@@ -383,7 +382,7 @@ module core #(
             registers #(
                 .THREADS_PER_BLOCK(THREADS_PER_BLOCK),
                 .THREAD_ID(i),
-                .DATA_BITS(DATA_MEM_DATA_BITS),
+                .DATA_BITS(DATA_MEM_DATA_BITS)
             ) register_instance (
                 .clk(clk),
                 .reset(reset),
@@ -425,7 +424,7 @@ endmodule
 
 
 ====================================================================
->>> File: ./src/dcr.sv
+>>> File: src/dcr.sv
 ====================================================================
 
 `default_nettype none
@@ -435,30 +434,30 @@ endmodule
 // > Used to configure high-level settings
 // > In this minimal example, the DCR is used to configure the number of threads to run for the kernel
 module dcr (
-    input wire clk,
-    input wire reset,
+    input  logic clk,
+    input  logic reset,
 
-    input wire device_control_write_enable,
-    input wire [7:0] device_control_data,
-    output wire [7:0] thread_count,
+    input  logic        device_control_write_enable,
+    input  logic [7:0]  device_control_data,
+    output logic [7:0]  thread_count
 );
     // Store device control data in dedicated register
-    reg [7:0] device_conrol_register;
-    assign thread_count = device_conrol_register[7:0];
+    logic [7:0] device_control_register;
 
-    always @(posedge clk) begin
+    assign thread_count = device_control_register;
+
+    always_ff @(posedge clk) begin
         if (reset) begin
-            device_conrol_register <= 8'b0;
-        end else begin
-            if (device_control_write_enable) begin 
-                device_conrol_register <= device_control_data;
-            end
+            device_control_register <= 8'b0;
+        end else if (device_control_write_enable) begin
+            device_control_register <= device_control_data;
         end
     end
 endmodule
 
+
 ====================================================================
->>> File: ./src/decoder.sv
+>>> File: src/decoder.sv
 ====================================================================
 
 `default_nettype none
@@ -468,60 +467,60 @@ endmodule
 // > Decodes an instruction into the control signals necessary to execute it
 // > Each core has it's own decoder
 module decoder (
-    input wire clk,
-    input wire reset,
+    input  logic        clk,
+    input  logic        reset,
 
-    input reg [2:0] core_state,
-    input reg [15:0] instruction,
+    input  logic [2:0]  core_state,
+    input  logic [15:0] instruction,
     
     // Instruction Signals
-    output reg [3:0] decoded_rd_address,
-    output reg [3:0] decoded_rs_address,
-    output reg [3:0] decoded_rt_address,
-    output reg [2:0] decoded_nzp,
-    output reg [7:0] decoded_immediate,
+    output logic [3:0]  decoded_rd_address,
+    output logic [3:0]  decoded_rs_address,
+    output logic [3:0]  decoded_rt_address,
+    output logic [2:0]  decoded_nzp,
+    output logic [7:0]  decoded_immediate,
     
     // Control Signals
-    output reg decoded_reg_write_enable,           // Enable writing to a register
-    output reg decoded_mem_read_enable,            // Enable reading from memory
-    output reg decoded_mem_write_enable,           // Enable writing to memory
-    output reg decoded_nzp_write_enable,           // Enable writing to NZP register
-    output reg [1:0] decoded_reg_input_mux,        // Select input to register
-    output reg [1:0] decoded_alu_arithmetic_mux,   // Select arithmetic operation
-    output reg decoded_alu_output_mux,             // Select operation in ALU
-    output reg decoded_pc_mux,                     // Select source of next PC
+    output logic        decoded_reg_write_enable,         // Enable writing to a register
+    output logic        decoded_mem_read_enable,          // Enable reading from memory
+    output logic        decoded_mem_write_enable,         // Enable writing to memory
+    output logic        decoded_nzp_write_enable,         // Enable writing to NZP register
+    output logic [1:0]  decoded_reg_input_mux,            // Select input to register
+    output logic [1:0]  decoded_alu_arithmetic_mux,       // Select arithmetic operation
+    output logic        decoded_alu_output_mux,           // Select operation in ALU
+    output logic        decoded_pc_mux,                   // Select source of next PC
 
     // Return (finished executing thread)
-    output reg decoded_ret
+    output logic        decoded_ret
 );
-    localparam NOP = 4'b0000,
-        BRnzp = 4'b0001,
-        CMP = 4'b0010,
-        ADD = 4'b0011,
-        SUB = 4'b0100,
-        MUL = 4'b0101,
-        DIV = 4'b0110,
-        LDR = 4'b0111,
-        STR = 4'b1000,
-        CONST = 4'b1001,
-        RET = 4'b1111;
+    localparam logic [3:0] NOP   = 4'b0000,
+                           BRnzp = 4'b0001,
+                           CMP   = 4'b0010,
+                           ADD   = 4'b0011,
+                           SUB   = 4'b0100,
+                           MUL   = 4'b0101,
+                           DIV   = 4'b0110,
+                           LDR   = 4'b0111,
+                           STR   = 4'b1000,
+                           CONST = 4'b1001,
+                           RET   = 4'b1111;
 
-    always @(posedge clk) begin 
+    always_ff @(posedge clk) begin 
         if (reset) begin 
-            decoded_rd_address <= 0;
-            decoded_rs_address <= 0;
-            decoded_rt_address <= 0;
-            decoded_immediate <= 0;
-            decoded_nzp <= 0;
-            decoded_reg_write_enable <= 0;
-            decoded_mem_read_enable <= 0;
-            decoded_mem_write_enable <= 0;
-            decoded_nzp_write_enable <= 0;
-            decoded_reg_input_mux <= 0;
-            decoded_alu_arithmetic_mux <= 0;
-            decoded_alu_output_mux <= 0;
-            decoded_pc_mux <= 0;
-            decoded_ret <= 0;
+            decoded_rd_address        <= '0;
+            decoded_rs_address        <= '0;
+            decoded_rt_address        <= '0;
+            decoded_immediate         <= '0;
+            decoded_nzp               <= '0;
+            decoded_reg_write_enable  <= 1'b0;
+            decoded_mem_read_enable   <= 1'b0;
+            decoded_mem_write_enable  <= 1'b0;
+            decoded_nzp_write_enable  <= 1'b0;
+            decoded_reg_input_mux     <= 2'b00;
+            decoded_alu_arithmetic_mux<= 2'b00;
+            decoded_alu_output_mux    <= 1'b0;
+            decoded_pc_mux            <= 1'b0;
+            decoded_ret               <= 1'b0;
         end else begin 
             // Decode when core_state = DECODE
             if (core_state == 3'b010) begin 
@@ -529,66 +528,64 @@ module decoder (
                 decoded_rd_address <= instruction[11:8];
                 decoded_rs_address <= instruction[7:4];
                 decoded_rt_address <= instruction[3:0];
-                decoded_immediate <= instruction[7:0];
-                decoded_nzp <= instruction[11:9];
+                decoded_immediate  <= instruction[7:0];
+                decoded_nzp        <= instruction[11:9];
 
                 // Control signals reset on every decode and set conditionally by instruction
-                decoded_reg_write_enable <= 0;
-                decoded_mem_read_enable <= 0;
-                decoded_mem_write_enable <= 0;
-                decoded_nzp_write_enable <= 0;
-                decoded_reg_input_mux <= 0;
-                decoded_alu_arithmetic_mux <= 0;
-                decoded_alu_output_mux <= 0;
-                decoded_pc_mux <= 0;
-                decoded_ret <= 0;
+                decoded_reg_write_enable   <= 1'b0;
+                decoded_mem_read_enable    <= 1'b0;
+                decoded_mem_write_enable   <= 1'b0;
+                decoded_nzp_write_enable   <= 1'b0;
+                decoded_reg_input_mux      <= 2'b00;
+                decoded_alu_arithmetic_mux <= 2'b00;
+                decoded_alu_output_mux     <= 1'b0;
+                decoded_pc_mux             <= 1'b0;
+                decoded_ret                <= 1'b0;
 
                 // Set the control signals for each instruction
                 case (instruction[15:12])
-                    NOP: begin 
-                        // no-op
-                    end
+                    NOP: ; // no-op
                     BRnzp: begin 
-                        decoded_pc_mux <= 1;
+                        decoded_pc_mux <= 1'b1;
                     end
                     CMP: begin 
-                        decoded_alu_output_mux <= 1;
-                        decoded_nzp_write_enable <= 1;
+                        decoded_alu_output_mux   <= 1'b1;
+                        decoded_nzp_write_enable <= 1'b1;
                     end
                     ADD: begin 
-                        decoded_reg_write_enable <= 1;
-                        decoded_reg_input_mux <= 2'b00;
+                        decoded_reg_write_enable   <= 1'b1;
+                        decoded_reg_input_mux      <= 2'b00;
                         decoded_alu_arithmetic_mux <= 2'b00;
                     end
                     SUB: begin 
-                        decoded_reg_write_enable <= 1;
-                        decoded_reg_input_mux <= 2'b00;
+                        decoded_reg_write_enable   <= 1'b1;
+                        decoded_reg_input_mux      <= 2'b00;
                         decoded_alu_arithmetic_mux <= 2'b01;
                     end
                     MUL: begin 
-                        decoded_reg_write_enable <= 1;
-                        decoded_reg_input_mux <= 2'b00;
+                        decoded_reg_write_enable   <= 1'b1;
+                        decoded_reg_input_mux      <= 2'b00;
                         decoded_alu_arithmetic_mux <= 2'b10;
                     end
                     DIV: begin 
-                        decoded_reg_write_enable <= 1;
-                        decoded_reg_input_mux <= 2'b00;
+                        decoded_reg_write_enable   <= 1'b1;
+                        decoded_reg_input_mux      <= 2'b00;
                         decoded_alu_arithmetic_mux <= 2'b11;
                     end
                     LDR: begin 
-                        decoded_reg_write_enable <= 1;
-                        decoded_reg_input_mux <= 2'b01;
-                        decoded_mem_read_enable <= 1;
+                        decoded_reg_write_enable <= 1'b1;
+                        decoded_reg_input_mux    <= 2'b01;
+                        decoded_mem_read_enable  <= 1'b1;
                     end
                     STR: begin 
-                        decoded_mem_write_enable <= 1;
+                        decoded_mem_write_enable <= 1'b1;
                     end
                     CONST: begin 
-                        decoded_reg_write_enable <= 1;
-                        decoded_reg_input_mux <= 2'b10;
+                        decoded_reg_write_enable <= 1'b1;
+                        decoded_reg_input_mux    <= 2'b10;
                     end
                     RET: begin 
-                        decoded_ret <= 1;
+                        decoded_ret <= 1'b1;
                     end
                 endcase
             end
@@ -598,104 +595,185 @@ endmodule
 
 
 ====================================================================
->>> File: ./src/dispatch.sv
+>>> File: src/dispatch.sv
 ====================================================================
 
 `default_nettype none
 `timescale 1ns/1ns
 
-// BLOCK DISPATCH
-// > The GPU has one dispatch unit at the top level
-// > Manages processing of threads and marks kernel execution as done
-// > Sends off batches of threads in blocks to be executed by available compute cores
+// ============================================================
+//  DISPATCH UNIT (latch-free, width-safe, debug-friendly)
+// ============================================================
+
 module dispatch #(
-    parameter NUM_CORES = 2,
-    parameter THREADS_PER_BLOCK = 4
+    parameter int NUM_CORES          = 2,
+    parameter int THREADS_PER_BLOCK  = 4
 ) (
-    input wire clk,
-    input wire reset,
-    input wire start,
+    input  logic clk,
+    input  logic reset,
+    input  logic start,
 
     // Kernel Metadata
-    input wire [7:0] thread_count,
+    input  logic [7:0] thread_count,
 
     // Core States
-    input reg [NUM_CORES-1:0] core_done,
-    output reg [NUM_CORES-1:0] core_start,
-    output reg [NUM_CORES-1:0] core_reset,
-    output reg [7:0] core_block_id [NUM_CORES-1:0],
-    output reg [$clog2(THREADS_PER_BLOCK):0] core_thread_count [NUM_CORES-1:0],
+    input  logic [NUM_CORES-1:0]                          core_done,
+    output logic [NUM_CORES-1:0]                          core_start,
+    output logic [NUM_CORES-1:0]                          core_reset,
+    output logic [7:0]                                    core_block_id     [NUM_CORES],
+    output logic [$clog2(THREADS_PER_BLOCK):0]            core_thread_count [NUM_CORES],
 
     // Kernel Execution
-    output reg done
+    output logic done
 );
-    // Calculate the total number of blocks based on total threads & threads per block
-    wire [7:0] total_blocks;
-    assign total_blocks = (thread_count + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
 
-    // Keep track of how many blocks have been processed
-    reg [7:0] blocks_dispatched; // How many blocks have been sent to cores?
-    reg [7:0] blocks_done; // How many blocks have finished processing?
-    reg start_execution; // EDA: Unimportant hack used because of EDA tooling
+    // --------------------------------------------------------
+    // State registers
+    // --------------------------------------------------------
+    logic [7:0] total_blocks;
 
-    always @(posedge clk) begin
-        if (reset) begin
-            done <= 0;
-            blocks_dispatched = 0;
-            blocks_done = 0;
-            start_execution <= 0;
+    logic [7:0] blocks_dispatched, blocks_done;
+    logic [7:0] bd_next, bn_next;
 
-            for (int i = 0; i < NUM_CORES; i++) begin
-                core_start[i] <= 0;
-                core_reset[i] <= 1;
-                core_block_id[i] <= 0;
-                core_thread_count[i] <= THREADS_PER_BLOCK;
-            end
-        end else if (start) begin    
-            // EDA: Indirect way to get @(posedge start) without driving from 2 different clocks
-            if (!start_execution) begin 
-                start_execution <= 1;
-                for (int i = 0; i < NUM_CORES; i++) begin
-                    core_reset[i] <= 1;
-                end
-            end
+    logic [NUM_CORES-1:0] core_busy, core_busy_next;
+    logic [NUM_CORES-1:0] core_start_r, core_start_next;
+    logic [NUM_CORES-1:0] core_reset_r, core_reset_next;
 
-            // If the last block has finished processing, mark this kernel as done executing
-            if (blocks_done == total_blocks) begin 
-                done <= 1;
-            end
+    // Register the per-core metadata to avoid latches
+    logic [7:0]                                   core_block_id_r     [NUM_CORES];
+    logic [$clog2(THREADS_PER_BLOCK):0]           core_thread_count_r [NUM_CORES];
+    logic [7:0]                                   core_block_id_next     [NUM_CORES];
+    logic [$clog2(THREADS_PER_BLOCK):0]           core_thread_count_next [NUM_CORES];
 
-            for (int i = 0; i < NUM_CORES; i++) begin
-                if (core_reset[i]) begin 
-                    core_reset[i] <= 0;
+    logic done_r, done_next;
+    logic start_execution;
 
-                    // If this core was just reset, check if there are more blocks to be dispatched
-                    if (blocks_dispatched < total_blocks) begin 
-                        core_start[i] <= 1;
-                        core_block_id[i] <= blocks_dispatched;
-                        core_thread_count[i] <= (blocks_dispatched == total_blocks - 1) 
-                            ? thread_count - (blocks_dispatched * THREADS_PER_BLOCK)
-                            : THREADS_PER_BLOCK;
+    // Drive outputs from registered state
+    assign core_start        = core_start_r;
+    assign core_reset        = core_reset_r;
+    assign core_block_id     = core_block_id_r;
+    assign core_thread_count = core_thread_count_r;
+    assign done              = done_r;
 
-                        blocks_dispatched = blocks_dispatched + 1;
-                    end
-                end
-            end
+    // --------------------------------------------------------
+    // 8-bit safe computation of total blocks
+    // --------------------------------------------------------
+    assign total_blocks = (thread_count + 8'(THREADS_PER_BLOCK) - 8'd1) / 8'(THREADS_PER_BLOCK);
 
-            for (int i = 0; i < NUM_CORES; i++) begin
-                if (core_start[i] && core_done[i]) begin
-                    // If a core just finished executing it's current block, reset it
-                    core_reset[i] <= 1;
-                    core_start[i] <= 0;
-                    blocks_done = blocks_done + 1;
+    // --------------------------------------------------------
+    // Combinational next-state logic
+    // --------------------------------------------------------
+    always_comb begin
+        // Defaults: hold current registered values
+        bd_next              = blocks_dispatched;
+        bn_next              = blocks_done;
+
+        core_start_next      = '0;                 // one-cycle pulse
+        core_reset_next      = core_reset_r;       // usually held then toggled
+        core_busy_next       = core_busy;
+        done_next            = done_r;
+
+        // Default next = current for registered arrays (prevents latches)
+        for (int i = 0; i < NUM_CORES; i++) begin
+            core_block_id_next[i]     = core_block_id_r[i];
+            core_thread_count_next[i] = core_thread_count_r[i];
+        end
+
+        // Dispatch new work on cores released from reset
+        for (int i = 0; i < NUM_CORES; i++) begin
+            if (core_reset_r[i]) begin
+                core_reset_next[i] = 1'b0;
+
+                if (bd_next < total_blocks) begin
+                    core_start_next[i]      = 1'b1;
+                    core_busy_next[i]       = 1'b1;
+
+                    // Assign metadata
+                    core_block_id_next[i]   = bd_next;
+                    core_thread_count_next[i] = $bits(core_thread_count_next[i])'(
+                        (bd_next == total_blocks - 8'd1)
+                            ? (thread_count - (bd_next * 8'(THREADS_PER_BLOCK)))
+                            : 8'(THREADS_PER_BLOCK)
+                    );
+
+`ifdef DEBUG_LOG
+                    $display("[%0t][DISPATCH] core=%0d START block_id=%0d threads=%0d total_blocks=%0d",
+                             $time, i, bd_next,
+                             (bd_next == total_blocks - 8'd1)
+                               ? (thread_count - (bd_next * 8'(THREADS_PER_BLOCK)))
+                               : 8'(THREADS_PER_BLOCK),
+                             total_blocks);
+`endif
+                    bd_next = bd_next + 8'd1;
                 end
             end
         end
+
+        // Handle completions
+        for (int i = 0; i < NUM_CORES; i++) begin
+            if (core_busy[i] && core_done[i]) begin
+                core_reset_next[i] = 1'b1;
+                core_start_next[i] = 1'b0;
+                core_busy_next[i]  = 1'b0;
+                bn_next            = bn_next + 8'd1;
+
+`ifdef DEBUG_LOG
+                $display("[%0t][DISPATCH] core=%0d DONE blocks_done=%0d/%0d",
+                         $time, i, bn_next, total_blocks);
+`endif
+            end
+        end
+
+        // Mark kernel completion
+        if (bn_next == total_blocks)
+            done_next = 1'b1;
     end
+
+    // --------------------------------------------------------
+    // Sequential state update
+    // --------------------------------------------------------
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            blocks_dispatched <= '0;
+            blocks_done       <= '0;
+
+            core_busy         <= '0;
+            core_start_r      <= '0;
+            core_reset_r      <= {NUM_CORES{1'b1}}; // hold cores in reset at power-up
+
+            done_r            <= 1'b0;
+            start_execution   <= 1'b0;
+
+            foreach (core_block_id_r[i])     core_block_id_r[i]     <= '0;
+            foreach (core_thread_count_r[i]) core_thread_count_r[i] <= THREADS_PER_BLOCK[$bits(core_thread_count_r[i])-1:0];
+
+        end else if (start) begin
+            // pseudo-posedge(start) to initialize a run
+            if (!start_execution)
+                start_execution <= 1'b1;
+
+            // Register transitions
+            blocks_dispatched <= bd_next;
+            blocks_done       <= bn_next;
+
+            core_busy         <= core_busy_next;
+            core_start_r      <= core_start_next;
+            core_reset_r      <= core_reset_next;
+
+            done_r            <= done_next;
+
+            for (int i = 0; i < NUM_CORES; i++) begin
+                core_block_id_r[i]     <= core_block_id_next[i];
+                core_thread_count_r[i] <= core_thread_count_next[i];
+            end
+        end
+    end
+
 endmodule
 
+
 ====================================================================
->>> File: ./src/fetcher.sv
+>>> File: src/fetcher.sv
 ====================================================================
 
 `default_nettype none
@@ -705,52 +783,52 @@ endmodule
 // > Retrieves the instruction at the current PC from global data memory
 // > Each core has it's own fetcher
 module fetcher #(
-    parameter PROGRAM_MEM_ADDR_BITS = 8,
-    parameter PROGRAM_MEM_DATA_BITS = 16
+    parameter int PROGRAM_MEM_ADDR_BITS = 8,
+    parameter int PROGRAM_MEM_DATA_BITS = 16
 ) (
-    input wire clk,
-    input wire reset,
+    input  logic clk,
+    input  logic reset,
     
     // Execution State
-    input reg [2:0] core_state,
-    input reg [7:0] current_pc,
+    input  logic [2:0]                      core_state,
+    input  logic [7:0]                      current_pc,
 
     // Program Memory
-    output reg mem_read_valid,
-    output reg [PROGRAM_MEM_ADDR_BITS-1:0] mem_read_address,
-    input reg mem_read_ready,
-    input reg [PROGRAM_MEM_DATA_BITS-1:0] mem_read_data,
+    output logic                            mem_read_valid,
+    output logic [PROGRAM_MEM_ADDR_BITS-1:0] mem_read_address,
+    input  logic                            mem_read_ready,
+    input  logic [PROGRAM_MEM_DATA_BITS-1:0] mem_read_data,
 
     // Fetcher Output
-    output reg [2:0] fetcher_state,
-    output reg [PROGRAM_MEM_DATA_BITS-1:0] instruction,
+    output logic [2:0]                      fetcher_state,
+    output logic [PROGRAM_MEM_DATA_BITS-1:0] instruction
 );
-    localparam IDLE = 3'b000, 
-        FETCHING = 3'b001, 
-        FETCHED = 3'b010;
+    localparam logic [2:0] IDLE     = 3'b000,
+                           FETCHING = 3'b001,
+                           FETCHED  = 3'b010;
     
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (reset) begin
-            fetcher_state <= IDLE;
-            mem_read_valid <= 0;
-            mem_read_address <= 0;
-            instruction <= {PROGRAM_MEM_DATA_BITS{1'b0}};
+            fetcher_state   <= IDLE;
+            mem_read_valid  <= 1'b0;
+            mem_read_address<= '0;
+            instruction     <= '0;
         end else begin
-            case (fetcher_state)
+            unique case (fetcher_state)
                 IDLE: begin
                     // Start fetching when core_state = FETCH
                     if (core_state == 3'b001) begin
-                        fetcher_state <= FETCHING;
-                        mem_read_valid <= 1;
-                        mem_read_address <= current_pc;
+                        fetcher_state   <= FETCHING;
+                        mem_read_valid  <= 1'b1;
+                        mem_read_address<= current_pc; // same behavior as original
                     end
                 end
                 FETCHING: begin
                     // Wait for response from program memory
                     if (mem_read_ready) begin
-                        fetcher_state <= FETCHED;
-                        instruction <= mem_read_data; // Store the instruction when received
-                        mem_read_valid <= 0;
+                        fetcher_state  <= FETCHED;
+                        instruction    <= mem_read_data; // Store the instruction when received
+                        mem_read_valid <= 1'b0;
                     end
                 end
                 FETCHED: begin
@@ -766,7 +844,7 @@ endmodule
 
 
 ====================================================================
->>> File: ./src/gpu.sv
+>>> File: src/gpu.sv
 ====================================================================
 
 `default_nettype none
@@ -779,69 +857,69 @@ endmodule
 // > Has memory controllers to interface between external memory and its multiple cores
 // > Configurable number of cores and thread capacity per core
 module gpu #(
-    parameter DATA_MEM_ADDR_BITS = 8,        // Number of bits in data memory address (256 rows)
-    parameter DATA_MEM_DATA_BITS = 8,        // Number of bits in data memory value (8 bit data)
-    parameter DATA_MEM_NUM_CHANNELS = 4,     // Number of concurrent channels for sending requests to data memory
-    parameter PROGRAM_MEM_ADDR_BITS = 8,     // Number of bits in program memory address (256 rows)
-    parameter PROGRAM_MEM_DATA_BITS = 16,    // Number of bits in program memory value (16 bit instruction)
-    parameter PROGRAM_MEM_NUM_CHANNELS = 1,  // Number of concurrent channels for sending requests to program memory
-    parameter NUM_CORES = 2,                 // Number of cores to include in this GPU
-    parameter THREADS_PER_BLOCK = 4          // Number of threads to handle per block (determines the compute resources of each core)
+    parameter int DATA_MEM_ADDR_BITS       = 8,   // Number of bits in data memory address (256 rows)
+    parameter int DATA_MEM_DATA_BITS       = 8,   // Number of bits in data memory value (8 bit data)
+    parameter int DATA_MEM_NUM_CHANNELS    = 4,   // Number of concurrent channels for sending requests to data memory
+    parameter int PROGRAM_MEM_ADDR_BITS    = 8,   // Number of bits in program memory address (256 rows)
+    parameter int PROGRAM_MEM_DATA_BITS    = 16,  // Number of bits in program memory value (16 bit instruction)
+    parameter int PROGRAM_MEM_NUM_CHANNELS = 1,   // Number of concurrent channels for sending requests to program memory
+    parameter int NUM_CORES                = 2,   // Number of cores to include in this GPU
+    parameter int THREADS_PER_BLOCK        = 4    // Number of threads to handle per block (per core)
 ) (
-    input wire clk,
-    input wire reset,
+    input  logic clk,
+    input  logic reset,
 
     // Kernel Execution
-    input wire start,
-    output wire done,
+    input  logic start,
+    output logic done,
 
     // Device Control Register
-    input wire device_control_write_enable,
-    input wire [7:0] device_control_data,
+    input  logic       device_control_write_enable,
+    input  logic [7:0] device_control_data,
 
     // Program Memory
-    output wire [PROGRAM_MEM_NUM_CHANNELS-1:0] program_mem_read_valid,
-    output wire [PROGRAM_MEM_ADDR_BITS-1:0] program_mem_read_address [PROGRAM_MEM_NUM_CHANNELS-1:0],
-    input wire [PROGRAM_MEM_NUM_CHANNELS-1:0] program_mem_read_ready,
-    input wire [PROGRAM_MEM_DATA_BITS-1:0] program_mem_read_data [PROGRAM_MEM_NUM_CHANNELS-1:0],
+    output logic [PROGRAM_MEM_NUM_CHANNELS-1:0]              program_mem_read_valid,
+    output logic [PROGRAM_MEM_ADDR_BITS-1:0]                 program_mem_read_address [PROGRAM_MEM_NUM_CHANNELS],
+    input  logic [PROGRAM_MEM_NUM_CHANNELS-1:0]              program_mem_read_ready,
+    input  logic [PROGRAM_MEM_DATA_BITS-1:0]                 program_mem_read_data   [PROGRAM_MEM_NUM_CHANNELS],
 
     // Data Memory
-    output wire [DATA_MEM_NUM_CHANNELS-1:0] data_mem_read_valid,
-    output wire [DATA_MEM_ADDR_BITS-1:0] data_mem_read_address [DATA_MEM_NUM_CHANNELS-1:0],
-    input wire [DATA_MEM_NUM_CHANNELS-1:0] data_mem_read_ready,
-    input wire [DATA_MEM_DATA_BITS-1:0] data_mem_read_data [DATA_MEM_NUM_CHANNELS-1:0],
-    output wire [DATA_MEM_NUM_CHANNELS-1:0] data_mem_write_valid,
-    output wire [DATA_MEM_ADDR_BITS-1:0] data_mem_write_address [DATA_MEM_NUM_CHANNELS-1:0],
-    output wire [DATA_MEM_DATA_BITS-1:0] data_mem_write_data [DATA_MEM_NUM_CHANNELS-1:0],
-    input wire [DATA_MEM_NUM_CHANNELS-1:0] data_mem_write_ready
+    output logic [DATA_MEM_NUM_CHANNELS-1:0]                 data_mem_read_valid,
+    output logic [DATA_MEM_ADDR_BITS-1:0]                    data_mem_read_address  [DATA_MEM_NUM_CHANNELS],
+    input  logic [DATA_MEM_NUM_CHANNELS-1:0]                 data_mem_read_ready,
+    input  logic [DATA_MEM_DATA_BITS-1:0]                    data_mem_read_data     [DATA_MEM_NUM_CHANNELS],
+    output logic [DATA_MEM_NUM_CHANNELS-1:0]                 data_mem_write_valid,
+    output logic [DATA_MEM_ADDR_BITS-1:0]                    data_mem_write_address [DATA_MEM_NUM_CHANNELS],
+    output logic [DATA_MEM_DATA_BITS-1:0]                    data_mem_write_data    [DATA_MEM_NUM_CHANNELS],
+    input  logic [DATA_MEM_NUM_CHANNELS-1:0]                 data_mem_write_ready
 );
     // Control
-    wire [7:0] thread_count;
+    logic [7:0] thread_count;
 
     // Compute Core State
-    reg [NUM_CORES-1:0] core_start;
-    reg [NUM_CORES-1:0] core_reset;
-    reg [NUM_CORES-1:0] core_done;
-    reg [7:0] core_block_id [NUM_CORES-1:0];
-    reg [$clog2(THREADS_PER_BLOCK):0] core_thread_count [NUM_CORES-1:0];
+    logic [NUM_CORES-1:0]                           core_start;
+    logic [NUM_CORES-1:0]                           core_reset;
+    logic [NUM_CORES-1:0]                           core_done;
+    logic [7:0]                                      core_block_id     [NUM_CORES];
+    logic [$clog2(THREADS_PER_BLOCK):0]              core_thread_count [NUM_CORES];
 
     // LSU <> Data Memory Controller Channels
-    localparam NUM_LSUS = NUM_CORES * THREADS_PER_BLOCK;
-    reg [NUM_LSUS-1:0] lsu_read_valid;
-    reg [DATA_MEM_ADDR_BITS-1:0] lsu_read_address [NUM_LSUS-1:0];
-    reg [NUM_LSUS-1:0] lsu_read_ready;
-    reg [DATA_MEM_DATA_BITS-1:0] lsu_read_data [NUM_LSUS-1:0];
-    reg [NUM_LSUS-1:0] lsu_write_valid;
-    reg [DATA_MEM_ADDR_BITS-1:0] lsu_write_address [NUM_LSUS-1:0];
-    reg [DATA_MEM_DATA_BITS-1:0] lsu_write_data [NUM_LSUS-1:0];
-    reg [NUM_LSUS-1:0] lsu_write_ready;
+    localparam int NUM_LSUS = NUM_CORES * THREADS_PER_BLOCK;
+    logic [NUM_LSUS-1:0]                             lsu_read_valid;
+    logic [DATA_MEM_ADDR_BITS-1:0]                   lsu_read_address  [NUM_LSUS];
+    logic [NUM_LSUS-1:0]                             lsu_read_ready;
+    logic [DATA_MEM_DATA_BITS-1:0]                   lsu_read_data     [NUM_LSUS];
+    logic [NUM_LSUS-1:0]                             lsu_write_valid;
+    logic [DATA_MEM_ADDR_BITS-1:0]                   lsu_write_address [NUM_LSUS];
+    logic [DATA_MEM_DATA_BITS-1:0]                   lsu_write_data    [NUM_LSUS];
+    logic [NUM_LSUS-1:0]                             lsu_write_ready;
 
     // Fetcher <> Program Memory Controller Channels
-    localparam NUM_FETCHERS = NUM_CORES;
-    reg [NUM_FETCHERS-1:0] fetcher_read_valid;
-    reg [PROGRAM_MEM_ADDR_BITS-1:0] fetcher_read_address [NUM_FETCHERS-1:0];
-    reg [NUM_FETCHERS-1:0] fetcher_read_ready;
-    reg [PROGRAM_MEM_DATA_BITS-1:0] fetcher_read_data [NUM_FETCHERS-1:0];
+    localparam int NUM_FETCHERS = NUM_CORES;
+    logic [NUM_FETCHERS-1:0]                          fetcher_read_valid;
+    logic [PROGRAM_MEM_ADDR_BITS-1:0]                 fetcher_read_address [NUM_FETCHERS];
+    logic [NUM_FETCHERS-1:0]                          fetcher_read_ready;
+    logic [PROGRAM_MEM_DATA_BITS-1:0]                 fetcher_read_data   [NUM_FETCHERS];
     
     // Device Control Register
     dcr dcr_instance (
@@ -863,46 +941,70 @@ module gpu #(
         .clk(clk),
         .reset(reset),
 
-        .consumer_read_valid(lsu_read_valid),
+        .consumer_read_valid (lsu_read_valid),
         .consumer_read_address(lsu_read_address),
-        .consumer_read_ready(lsu_read_ready),
-        .consumer_read_data(lsu_read_data),
+        .consumer_read_ready (lsu_read_ready),
+        .consumer_read_data  (lsu_read_data),
         .consumer_write_valid(lsu_write_valid),
         .consumer_write_address(lsu_write_address),
-        .consumer_write_data(lsu_write_data),
+        .consumer_write_data (lsu_write_data),
         .consumer_write_ready(lsu_write_ready),
 
-        .mem_read_valid(data_mem_read_valid),
+        .mem_read_valid (data_mem_read_valid),
         .mem_read_address(data_mem_read_address),
-        .mem_read_ready(data_mem_read_ready),
-        .mem_read_data(data_mem_read_data),
-        .mem_write_valid(data_mem_write_valid),
+        .mem_read_ready (data_mem_read_ready),
+        .mem_read_data  (data_mem_read_data),
+        .mem_write_valid (data_mem_write_valid),
         .mem_write_address(data_mem_write_address),
-        .mem_write_data(data_mem_write_data),
-        .mem_write_ready(data_mem_write_ready)
+        .mem_write_data  (data_mem_write_data),
+        .mem_write_ready (data_mem_write_ready)
     );
 
-    // Program Memory Controller
-    controller #(
+    // Program Memory Controller (read-only; tie off write path)
+    // Dummy signals to satisfy controller ports without changing behavior.
+    logic [PROGRAM_MEM_NUM_CHANNELS-1:0]              pmc_mem_write_valid_dummy;
+    logic [PROGRAM_MEM_ADDR_BITS-1:0]                 pmc_mem_write_address_dummy [PROGRAM_MEM_NUM_CHANNELS];
+    logic [PROGRAM_MEM_DATA_BITS-1:0]                 pmc_mem_write_data_dummy    [PROGRAM_MEM_NUM_CHANNELS];
+    // If your external program memory exposes a write_ready, drive it as 0 (never ready) or 1 as you prefer.
+    // It is unused because WRITE_ENABLE=0, but the controller still has the port.
+    logic [PROGRAM_MEM_NUM_CHANNELS-1:0]              pmc_mem_write_ready_dummy;
+    assign pmc_mem_write_ready_dummy = '0;
+
+        controller #(
         .ADDR_BITS(PROGRAM_MEM_ADDR_BITS),
         .DATA_BITS(PROGRAM_MEM_DATA_BITS),
         .NUM_CONSUMERS(NUM_FETCHERS),
         .NUM_CHANNELS(PROGRAM_MEM_NUM_CHANNELS),
         .WRITE_ENABLE(0)
     ) program_memory_controller (
-        .clk(clk),
-        .reset(reset),
+        .clk   (clk),
+        .reset (reset),
 
-        .consumer_read_valid(fetcher_read_valid),
+        // READ consumers (fetchers)
+        .consumer_read_valid  (fetcher_read_valid),
         .consumer_read_address(fetcher_read_address),
-        .consumer_read_ready(fetcher_read_ready),
-        .consumer_read_data(fetcher_read_data),
+        .consumer_read_ready  (fetcher_read_ready),
+        .consumer_read_data   (fetcher_read_data),
 
-        .mem_read_valid(program_mem_read_valid),
+        // Memory (program) read path
+        .mem_read_valid (program_mem_read_valid),
         .mem_read_address(program_mem_read_address),
-        .mem_read_ready(program_mem_read_ready),
-        .mem_read_data(program_mem_read_data),
+        .mem_read_ready (program_mem_read_ready),
+        .mem_read_data  (program_mem_read_data),
+
+        // ---- TIE OFF unused WRITE consumer side (important!) ----
+        .consumer_write_valid   ('0),
+        .consumer_write_address ('{default:'0}),
+        .consumer_write_data    ('{default:'0}),
+        .consumer_write_ready   (),   // ignore
+
+        // ---- Dummy write path (already unused) ----
+        .mem_write_valid (pmc_mem_write_valid_dummy),
+        .mem_write_address(pmc_mem_write_address_dummy),
+        .mem_write_data  (pmc_mem_write_data_dummy),
+        .mem_write_ready (pmc_mem_write_ready_dummy)
     );
+
 
     // Dispatcher
     dispatch #(
@@ -925,63 +1027,63 @@ module gpu #(
     genvar i;
     generate
         for (i = 0; i < NUM_CORES; i = i + 1) begin : cores
-            // EDA: We create separate signals here to pass to cores because of a requirement
-            // by the OpenLane EDA flow (uses Verilog 2005) that prevents slicing the top-level signals
-            reg [THREADS_PER_BLOCK-1:0] core_lsu_read_valid;
-            reg [DATA_MEM_ADDR_BITS-1:0] core_lsu_read_address [THREADS_PER_BLOCK-1:0];
-            reg [THREADS_PER_BLOCK-1:0] core_lsu_read_ready;
-            reg [DATA_MEM_DATA_BITS-1:0] core_lsu_read_data [THREADS_PER_BLOCK-1:0];
-            reg [THREADS_PER_BLOCK-1:0] core_lsu_write_valid;
-            reg [DATA_MEM_ADDR_BITS-1:0] core_lsu_write_address [THREADS_PER_BLOCK-1:0];
-            reg [DATA_MEM_DATA_BITS-1:0] core_lsu_write_data [THREADS_PER_BLOCK-1:0];
-            reg [THREADS_PER_BLOCK-1:0] core_lsu_write_ready;
+            // EDA: separate per-core LSU <-> controller signals to avoid slicing limits
+            logic [THREADS_PER_BLOCK-1:0]              core_lsu_read_valid;
+            logic [DATA_MEM_ADDR_BITS-1:0]             core_lsu_read_address  [THREADS_PER_BLOCK];
+            logic [THREADS_PER_BLOCK-1:0]              core_lsu_read_ready;
+            logic [DATA_MEM_DATA_BITS-1:0]             core_lsu_read_data     [THREADS_PER_BLOCK];
+            logic [THREADS_PER_BLOCK-1:0]              core_lsu_write_valid;
+            logic [DATA_MEM_ADDR_BITS-1:0]             core_lsu_write_address [THREADS_PER_BLOCK];
+            logic [DATA_MEM_DATA_BITS-1:0]             core_lsu_write_data    [THREADS_PER_BLOCK];
+            logic [THREADS_PER_BLOCK-1:0]              core_lsu_write_ready;
 
             // Pass through signals between LSUs and data memory controller
             genvar j;
-            for (j = 0; j < THREADS_PER_BLOCK; j = j + 1) begin
-                localparam lsu_index = i * THREADS_PER_BLOCK + j;
-                always @(posedge clk) begin 
-                    lsu_read_valid[lsu_index] <= core_lsu_read_valid[j];
-                    lsu_read_address[lsu_index] <= core_lsu_read_address[j];
+            for (j = 0; j < THREADS_PER_BLOCK; j = j + 1) begin : lsu_xbar
+                localparam int lsu_index = i * THREADS_PER_BLOCK + j;
+                always_comb begin
+                    // core → global
+                    lsu_read_valid   [lsu_index] = core_lsu_read_valid[j];
+                    lsu_read_address [lsu_index] = core_lsu_read_address[j];
+                    lsu_write_valid  [lsu_index] = core_lsu_write_valid[j];
+                    lsu_write_address[lsu_index] = core_lsu_write_address[j];
+                    lsu_write_data   [lsu_index] = core_lsu_write_data[j];
 
-                    lsu_write_valid[lsu_index] <= core_lsu_write_valid[j];
-                    lsu_write_address[lsu_index] <= core_lsu_write_address[j];
-                    lsu_write_data[lsu_index] <= core_lsu_write_data[j];
-                    
-                    core_lsu_read_ready[j] <= lsu_read_ready[lsu_index];
-                    core_lsu_read_data[j] <= lsu_read_data[lsu_index];
-                    core_lsu_write_ready[j] <= lsu_write_ready[lsu_index];
-                end
+                    // global → core
+                    core_lsu_read_ready [j] = lsu_read_ready [lsu_index];
+                    core_lsu_read_data  [j] = lsu_read_data  [lsu_index];
+                    core_lsu_write_ready[j] = lsu_write_ready[lsu_index];
+                    end
             end
 
             // Compute Core
             core #(
-                .DATA_MEM_ADDR_BITS(DATA_MEM_ADDR_BITS),
-                .DATA_MEM_DATA_BITS(DATA_MEM_DATA_BITS),
-                .PROGRAM_MEM_ADDR_BITS(PROGRAM_MEM_ADDR_BITS),
-                .PROGRAM_MEM_DATA_BITS(PROGRAM_MEM_DATA_BITS),
-                .THREADS_PER_BLOCK(THREADS_PER_BLOCK),
+                .DATA_MEM_ADDR_BITS    (DATA_MEM_ADDR_BITS),
+                .DATA_MEM_DATA_BITS    (DATA_MEM_DATA_BITS),
+                .PROGRAM_MEM_ADDR_BITS (PROGRAM_MEM_ADDR_BITS),
+                .PROGRAM_MEM_DATA_BITS (PROGRAM_MEM_DATA_BITS),
+                .THREADS_PER_BLOCK     (THREADS_PER_BLOCK)
             ) core_instance (
-                .clk(clk),
-                .reset(core_reset[i]),
-                .start(core_start[i]),
-                .done(core_done[i]),
-                .block_id(core_block_id[i]),
+                .clk   (clk),
+                .reset (core_reset[i]),
+                .start (core_start[i]),
+                .done  (core_done[i]),
+                .block_id    (core_block_id[i]),
                 .thread_count(core_thread_count[i]),
                 
-                .program_mem_read_valid(fetcher_read_valid[i]),
+                .program_mem_read_valid  (fetcher_read_valid[i]),
                 .program_mem_read_address(fetcher_read_address[i]),
-                .program_mem_read_ready(fetcher_read_ready[i]),
-                .program_mem_read_data(fetcher_read_data[i]),
+                .program_mem_read_ready  (fetcher_read_ready[i]),
+                .program_mem_read_data   (fetcher_read_data[i]),
 
-                .data_mem_read_valid(core_lsu_read_valid),
-                .data_mem_read_address(core_lsu_read_address),
-                .data_mem_read_ready(core_lsu_read_ready),
-                .data_mem_read_data(core_lsu_read_data),
-                .data_mem_write_valid(core_lsu_write_valid),
+                .data_mem_read_valid   (core_lsu_read_valid),
+                .data_mem_read_address (core_lsu_read_address),
+                .data_mem_read_ready   (core_lsu_read_ready),
+                .data_mem_read_data    (core_lsu_read_data),
+                .data_mem_write_valid  (core_lsu_write_valid),
                 .data_mem_write_address(core_lsu_write_address),
-                .data_mem_write_data(core_lsu_write_data),
-                .data_mem_write_ready(core_lsu_write_ready)
+                .data_mem_write_data   (core_lsu_write_data),
+                .data_mem_write_ready  (core_lsu_write_ready)
             );
         end
     endgenerate
@@ -989,7 +1091,7 @@ endmodule
 
 
 ====================================================================
->>> File: ./src/lsu.sv
+>>> File: src/lsu.sv
 ====================================================================
 
 `default_nettype none
@@ -997,74 +1099,77 @@ endmodule
 
 // LOAD-STORE UNIT
 // > Handles asynchronous memory load and store operations and waits for response
-// > Each thread in each core has it's own LSU
+// > Each thread in each core has its own LSU
 // > LDR, STR instructions are executed here
 module lsu (
-    input wire clk,
-    input wire reset,
-    input wire enable, // If current block has less threads then block size, some LSUs will be inactive
+    input  logic clk,
+    input  logic reset,
+    input  logic enable, // If current block has fewer threads than block size, some LSUs will be inactive
 
     // State
-    input reg [2:0] core_state,
+    input  logic [2:0] core_state,
 
-    // Memory Control Sgiansl
-    input reg decoded_mem_read_enable,
-    input reg decoded_mem_write_enable,
+    // Memory Control Signals
+    input  logic decoded_mem_read_enable,
+    input  logic decoded_mem_write_enable,
 
     // Registers
-    input reg [7:0] rs,
-    input reg [7:0] rt,
+    input  logic [7:0] rs,
+    input  logic [7:0] rt,
 
     // Data Memory
-    output reg mem_read_valid,
-    output reg [7:0] mem_read_address,
-    input reg mem_read_ready,
-    input reg [7:0] mem_read_data,
-    output reg mem_write_valid,
-    output reg [7:0] mem_write_address,
-    output reg [7:0] mem_write_data,
-    input reg mem_write_ready,
+    output logic       mem_read_valid,
+    output logic [7:0] mem_read_address,
+    input  logic       mem_read_ready,
+    input  logic [7:0] mem_read_data,
+    output logic       mem_write_valid,
+    output logic [7:0] mem_write_address,
+    output logic [7:0] mem_write_data,
+    input  logic       mem_write_ready,
 
     // LSU Outputs
-    output reg [1:0] lsu_state,
-    output reg [7:0] lsu_out
+    output logic [1:0] lsu_state,
+    output logic [7:0] lsu_out
 );
-    localparam IDLE = 2'b00, REQUESTING = 2'b01, WAITING = 2'b10, DONE = 2'b11;
+    localparam logic [1:0] IDLE = 2'b00,
+                           REQUESTING = 2'b01,
+                           WAITING = 2'b10,
+                           DONE = 2'b11;
 
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (reset) begin
-            lsu_state <= IDLE;
-            lsu_out <= 0;
-            mem_read_valid <= 0;
-            mem_read_address <= 0;
-            mem_write_valid <= 0;
-            mem_write_address <= 0;
-            mem_write_data <= 0;
+            lsu_state         <= IDLE;
+            lsu_out           <= 8'd0;
+            mem_read_valid    <= 1'b0;
+            mem_read_address  <= 8'd0;
+            mem_write_valid   <= 1'b0;
+            mem_write_address <= 8'd0;
+            mem_write_data    <= 8'd0;
         end else if (enable) begin
             // If memory read enable is triggered (LDR instruction)
-            if (decoded_mem_read_enable) begin 
+            if (decoded_mem_read_enable) begin
                 case (lsu_state)
                     IDLE: begin
                         // Only read when core_state = REQUEST
-                        if (core_state == 3'b011) begin 
+                        if (core_state == 3'b011) begin
                             lsu_state <= REQUESTING;
                         end
                     end
-                    REQUESTING: begin 
-                        mem_read_valid <= 1;
+                    REQUESTING: begin
+                        mem_read_valid   <= 1'b1;
                         mem_read_address <= rs;
-                        lsu_state <= WAITING;
+                        lsu_state        <= WAITING;
                     end
                     WAITING: begin
-                        if (mem_read_ready == 1) begin
-                            mem_read_valid <= 0;
-                            lsu_out <= mem_read_data;
-                            lsu_state <= DONE;
+                        if (mem_read_ready == 1'b1) begin
+                            mem_read_valid <= 1'b0;
+                            lsu_out        <= mem_read_data;
+                            lsu_state      <= DONE;
                         end
                     end
-                    DONE: begin 
+                    DONE: begin
                         // Reset when core_state = UPDATE
-                        if (core_state == 3'b110) begin 
+                        if (core_state == 3'b110) begin
                             lsu_state <= IDLE;
                         end
                     end
@@ -1072,41 +1177,42 @@ module lsu (
             end
 
             // If memory write enable is triggered (STR instruction)
-            if (decoded_mem_write_enable) begin 
+            if (decoded_mem_write_enable) begin
                 case (lsu_state)
                     IDLE: begin
-                        // Only read when core_state = REQUEST
-                        if (core_state == 3'b011) begin 
+                        // Only write when core_state = REQUEST
+                        if (core_state == 3'b011) begin
                             lsu_state <= REQUESTING;
                         end
                     end
-                    REQUESTING: begin 
-                        mem_write_valid <= 1;
+                    REQUESTING: begin
+                        mem_write_valid   <= 1'b1;
                         mem_write_address <= rs;
-                        mem_write_data <= rt;
-                        lsu_state <= WAITING;
+                        mem_write_data    <= rt;
+                        lsu_state         <= WAITING;
                     end
                     WAITING: begin
                         if (mem_write_ready) begin
-                            mem_write_valid <= 0;
-                            lsu_state <= DONE;
+                            mem_write_valid <= 1'b0;
+                            lsu_state       <= DONE;
                         end
                     end
-                    DONE: begin 
+                    DONE: begin
                         // Reset when core_state = UPDATE
-                        if (core_state == 3'b110) begin 
+                        if (core_state == 3'b110) begin
                             lsu_state <= IDLE;
                         end
                     end
                 endcase
             end
         end
+        // If not enabled, retain previous outputs/state (matches original behavior)
     end
 endmodule
 
 
 ====================================================================
->>> File: ./src/pc.sv
+>>> File: src/pc.sv
 ====================================================================
 
 `default_nettype none
@@ -1119,49 +1225,49 @@ endmodule
 // > The NZP register value is set by the CMP instruction (based on >/=/< comparison) to 
 //   initiate the BRnzp instruction for branching
 module pc #(
-    parameter DATA_MEM_DATA_BITS = 8,
-    parameter PROGRAM_MEM_ADDR_BITS = 8
+    parameter int DATA_MEM_DATA_BITS     = 8,
+    parameter int PROGRAM_MEM_ADDR_BITS  = 8
 ) (
-    input wire clk,
-    input wire reset,
-    input wire enable, // If current block has less threads then block size, some PCs will be inactive
+    input  logic clk,
+    input  logic reset,
+    input  logic enable, // If current block has less threads then block size, some PCs will be inactive
 
     // State
-    input reg [2:0] core_state,
+    input  logic [2:0]                          core_state,
 
     // Control Signals
-    input reg [2:0] decoded_nzp,
-    input reg [DATA_MEM_DATA_BITS-1:0] decoded_immediate,
-    input reg decoded_nzp_write_enable,
-    input reg decoded_pc_mux, 
+    input  logic [2:0]                          decoded_nzp,
+    input  logic [DATA_MEM_DATA_BITS-1:0]       decoded_immediate,
+    input  logic                                 decoded_nzp_write_enable,
+    input  logic                                 decoded_pc_mux, 
 
     // ALU Output - used for alu_out[2:0] to compare with NZP register
-    input reg [DATA_MEM_DATA_BITS-1:0] alu_out,
+    input  logic [DATA_MEM_DATA_BITS-1:0]       alu_out,
 
     // Current & Next PCs
-    input reg [PROGRAM_MEM_ADDR_BITS-1:0] current_pc,
-    output reg [PROGRAM_MEM_ADDR_BITS-1:0] next_pc
+    input  logic [PROGRAM_MEM_ADDR_BITS-1:0]    current_pc,
+    output logic [PROGRAM_MEM_ADDR_BITS-1:0]    next_pc
 );
-    reg [2:0] nzp;
+    logic [2:0] nzp;
 
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (reset) begin
-            nzp <= 3'b0;
-            next_pc <= 0;
+            nzp     <= 3'b000;
+            next_pc <= '0;
         end else if (enable) begin
             // Update PC when core_state = EXECUTE
             if (core_state == 3'b101) begin 
-                if (decoded_pc_mux == 1) begin 
-                    if (((nzp & decoded_nzp) != 3'b0)) begin 
+                if (decoded_pc_mux == 1'b1) begin 
+                    if ((nzp & decoded_nzp) != 3'b000) begin 
                         // On BRnzp instruction, branch to immediate if NZP case matches previous CMP
-                        next_pc <= decoded_immediate;
+                        next_pc <= decoded_immediate; // (implicit truncation if widths differ, same as original)
                     end else begin 
                         // Otherwise, just update to PC + 1 (next line)
-                        next_pc <= current_pc + 1;
+                        next_pc <= current_pc + 1'b1;
                     end
                 end else begin 
                     // By default update to PC + 1 (next line)
-                    next_pc <= current_pc + 1;
+                    next_pc <= current_pc + 1'b1;
                 end
             end   
 
@@ -1176,12 +1282,11 @@ module pc #(
             end      
         end
     end
-
 endmodule
 
 
 ====================================================================
->>> File: ./src/registers.sv
+>>> File: src/registers.sv
 ====================================================================
 
 `default_nettype none
@@ -1191,68 +1296,70 @@ endmodule
 // > Each thread within each core has it's own register file with 13 free registers and 3 read-only registers
 // > Read-only registers hold the familiar %blockIdx, %blockDim, and %threadIdx values critical to SIMD
 module registers #(
-    parameter THREADS_PER_BLOCK = 4,
-    parameter THREAD_ID = 0,
-    parameter DATA_BITS = 8
+    parameter int THREADS_PER_BLOCK = 4,
+    parameter int THREAD_ID         = 0,
+    parameter int DATA_BITS         = 8
 ) (
-    input wire clk,
-    input wire reset,
-    input wire enable, // If current block has less threads then block size, some registers will be inactive
+    input  logic clk,
+    input  logic reset,
+    input  logic enable, // If current block has less threads then block size, some registers will be inactive
 
     // Kernel Execution
-    input reg [7:0] block_id,
+    input  logic [7:0] block_id,
 
     // State
-    input reg [2:0] core_state,
+    input  logic [2:0] core_state,
 
     // Instruction Signals
-    input reg [3:0] decoded_rd_address,
-    input reg [3:0] decoded_rs_address,
-    input reg [3:0] decoded_rt_address,
+    input  logic [3:0] decoded_rd_address,
+    input  logic [3:0] decoded_rs_address,
+    input  logic [3:0] decoded_rt_address,
 
     // Control Signals
-    input reg decoded_reg_write_enable,
-    input reg [1:0] decoded_reg_input_mux,
-    input reg [DATA_BITS-1:0] decoded_immediate,
+    input  logic        decoded_reg_write_enable,
+    input  logic [1:0]  decoded_reg_input_mux,
+    input  logic [DATA_BITS-1:0] decoded_immediate,
 
     // Thread Unit Outputs
-    input reg [DATA_BITS-1:0] alu_out,
-    input reg [DATA_BITS-1:0] lsu_out,
+    input  logic [DATA_BITS-1:0] alu_out,
+    input  logic [DATA_BITS-1:0] lsu_out,
 
     // Registers
-    output reg [7:0] rs,
-    output reg [7:0] rt
+    output logic [7:0] rs,
+    output logic [7:0] rt
 );
-    localparam ARITHMETIC = 2'b00,
-        MEMORY = 2'b01,
-        CONSTANT = 2'b10;
+    localparam logic [1:0] ARITHMETIC = 2'b00,
+                           MEMORY     = 2'b01,
+                           CONSTANT   = 2'b10;
 
     // 16 registers per thread (13 free registers and 3 read-only registers)
-    reg [7:0] registers[15:0];
+    logic [7:0] registers [16];
 
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (reset) begin
             // Empty rs, rt
-            rs <= 0;
-            rt <= 0;
+            rs <= 8'd0;
+            rt <= 8'd0;
+
             // Initialize all free registers
-            registers[0] <= 8'b0;
-            registers[1] <= 8'b0;
-            registers[2] <= 8'b0;
-            registers[3] <= 8'b0;
-            registers[4] <= 8'b0;
-            registers[5] <= 8'b0;
-            registers[6] <= 8'b0;
-            registers[7] <= 8'b0;
-            registers[8] <= 8'b0;
-            registers[9] <= 8'b0;
-            registers[10] <= 8'b0;
-            registers[11] <= 8'b0;
-            registers[12] <= 8'b0;
+            registers[0]  <= 8'd0;
+            registers[1]  <= 8'd0;
+            registers[2]  <= 8'd0;
+            registers[3]  <= 8'd0;
+            registers[4]  <= 8'd0;
+            registers[5]  <= 8'd0;
+            registers[6]  <= 8'd0;
+            registers[7]  <= 8'd0;
+            registers[8]  <= 8'd0;
+            registers[9]  <= 8'd0;
+            registers[10] <= 8'd0;
+            registers[11] <= 8'd0;
+            registers[12] <= 8'd0;
+
             // Initialize read-only registers
-            registers[13] <= 8'b0;              // %blockIdx
-            registers[14] <= THREADS_PER_BLOCK; // %blockDim
-            registers[15] <= THREAD_ID;         // %threadIdx
+            registers[13] <= 8'd0;                      // %blockIdx
+            registers[14] <= THREADS_PER_BLOCK[7:0];    // %blockDim
+            registers[15] <= THREAD_ID[7:0];            // %threadIdx
         end else if (enable) begin 
             // [Bad Solution] Shouldn't need to set this every cycle
             registers[13] <= block_id; // Update the block_id when a new block is issued from dispatcher
@@ -1266,30 +1373,35 @@ module registers #(
             // Store rd when core_state = UPDATE
             if (core_state == 3'b110) begin 
                 // Only allow writing to R0 - R12
-                if (decoded_reg_write_enable && decoded_rd_address < 13) begin
-                    case (decoded_reg_input_mux)
+                if (decoded_reg_write_enable && (decoded_rd_address < 4'd13)) begin
+                    unique case (decoded_reg_input_mux)
                         ARITHMETIC: begin 
                             // ADD, SUB, MUL, DIV
-                            registers[decoded_rd_address] <= alu_out;
+                            registers[decoded_rd_address] <= alu_out[7:0];
                         end
                         MEMORY: begin 
                             // LDR
-                            registers[decoded_rd_address] <= lsu_out;
+                            registers[decoded_rd_address] <= lsu_out[7:0];
                         end
                         CONSTANT: begin 
                             // CONST
-                            registers[decoded_rd_address] <= decoded_immediate;
+                            registers[decoded_rd_address] <= decoded_immediate[7:0];
+                        end
+                        default: begin
+                            // no change
+                            registers[decoded_rd_address] <= registers[decoded_rd_address];
                         end
                     endcase
                 end
             end
         end
+        // When not enabled, hold state (matches original behavior)
     end
 endmodule
 
 
 ====================================================================
->>> File: ./src/scheduler.sv
+>>> File: src/scheduler.sv
 ====================================================================
 
 `default_nettype none
@@ -1297,80 +1409,77 @@ endmodule
 
 // SCHEDULER
 // > Manages the entire control flow of a single compute core processing 1 block
-// 1. FETCH - Retrieve instruction at current program counter (PC) from program memory
-// 2. DECODE - Decode the instruction into the relevant control signals
-// 3. REQUEST - If we have an instruction that accesses memory, trigger the async memory requests from LSUs
-// 4. WAIT - Wait for all async memory requests to resolve (if applicable)
-// 5. EXECUTE - Execute computations on retrieved data from registers / memory
-// 6. UPDATE - Update register values (including NZP register) and program counter
-// > Each core has it's own scheduler where multiple threads can be processed with
-//   the same control flow at once.
-// > Technically, different instructions can branch to different PCs, requiring "branch divergence." In
-//   this minimal implementation, we assume no branch divergence (naive approach for simplicity)
+// 1. FETCH  2. DECODE  3. REQUEST  4. WAIT  5. EXECUTE  6. UPDATE
+// > No branch divergence (all threads assumed to converge)
 module scheduler #(
-    parameter THREADS_PER_BLOCK = 4,
+    parameter int THREADS_PER_BLOCK = 4
 ) (
-    input wire clk,
-    input wire reset,
-    input wire start,
+    input  logic clk,
+    input  logic reset,
+    input  logic start,
     
     // Control Signals
-    input reg decoded_mem_read_enable,
-    input reg decoded_mem_write_enable,
-    input reg decoded_ret,
+    input  logic       decoded_mem_read_enable,   // (kept for interface parity; behavior unchanged)
+    input  logic       decoded_mem_write_enable,  // (unused here, as in original)
+    input  logic       decoded_ret,
 
     // Memory Access State
-    input reg [2:0] fetcher_state,
-    input reg [1:0] lsu_state [THREADS_PER_BLOCK-1:0],
+    input  logic [2:0]              fetcher_state,
+    input  logic [1:0]              lsu_state   [THREADS_PER_BLOCK],
 
     // Current & Next PC
-    output reg [7:0] current_pc,
-    input reg [7:0] next_pc [THREADS_PER_BLOCK-1:0],
+    output logic [7:0]              current_pc,
+    input  logic [7:0]              next_pc     [THREADS_PER_BLOCK],
 
     // Execution State
-    output reg [2:0] core_state,
-    output reg done
+    output logic [2:0]              core_state,
+    output logic                    done
 );
-    localparam IDLE = 3'b000, // Waiting to start
-        FETCH = 3'b001,       // Fetch instructions from program memory
-        DECODE = 3'b010,      // Decode instructions into control signals
-        REQUEST = 3'b011,     // Request data from registers or memory
-        WAIT = 3'b100,        // Wait for response from memory if necessary
-        EXECUTE = 3'b101,     // Execute ALU and PC calculations
-        UPDATE = 3'b110,      // Update registers, NZP, and PC
-        DONE = 3'b111;        // Done executing this block
-    
-    always @(posedge clk) begin 
+    localparam logic [2:0] IDLE    = 3'b000, // Waiting to start
+                           FETCH   = 3'b001, // Fetch instructions from program memory
+                           DECODE  = 3'b010, // Decode instructions into control signals
+                           REQUEST = 3'b011, // Trigger async LSU requests (if any)
+                           WAIT    = 3'b100, // Wait for LSUs
+                           EXECUTE = 3'b101, // Execute ALU/PC calculations
+                           UPDATE  = 3'b110, // Update registers, NZP, and PC
+                           DONE_S  = 3'b111; // Done executing this block
+
+    always_ff @(posedge clk) begin 
         if (reset) begin
-            current_pc <= 0;
+            current_pc <= 8'd0;
             core_state <= IDLE;
-            done <= 0;
+            done       <= 1'b0;
         end else begin 
-            case (core_state)
+            unique case (core_state)
                 IDLE: begin
-                    // Here after reset (before kernel is launched, or after previous block has been processed)
+                    // Here after reset (before kernel is launched, or after previous block)
                     if (start) begin 
                         // Start by fetching the next instruction for this block based on PC
                         core_state <= FETCH;
                     end
                 end
+
                 FETCH: begin 
                     // Move on once fetcher_state = FETCHED
                     if (fetcher_state == 3'b010) begin 
                         core_state <= DECODE;
                     end
                 end
+
                 DECODE: begin
                     // Decode is synchronous so we move on after one cycle
                     core_state <= REQUEST;
                 end
+
                 REQUEST: begin 
                     // Request is synchronous so we move on after one cycle
                     core_state <= WAIT;
                 end
+
                 WAIT: begin
                     // Wait for all LSUs to finish their request before continuing
-                    reg any_lsu_waiting = 1'b0;
+                    logic any_lsu_waiting;   // automatic inside block
+                    any_lsu_waiting = 1'b0;
                     for (int i = 0; i < THREADS_PER_BLOCK; i++) begin
                         // Make sure no lsu_state = REQUESTING or WAITING
                         if (lsu_state[i] == 2'b01 || lsu_state[i] == 2'b10) begin
@@ -1384,15 +1493,17 @@ module scheduler #(
                         core_state <= EXECUTE;
                     end
                 end
+
                 EXECUTE: begin
                     // Execute is synchronous so we move on after one cycle
                     core_state <= UPDATE;
                 end
+
                 UPDATE: begin 
                     if (decoded_ret) begin 
                         // If we reach a RET instruction, this block is done executing
-                        done <= 1;
-                        core_state <= DONE;
+                        done       <= 1'b1;
+                        core_state <= DONE_S;
                     end else begin 
                         // TODO: Branch divergence. For now assume all next_pc converge
                         current_pc <= next_pc[THREADS_PER_BLOCK-1];
@@ -1401,501 +1512,13 @@ module scheduler #(
                         core_state <= FETCH;
                     end
                 end
-                DONE: begin 
-                    // no-op
+
+                DONE_S: begin 
+                    // no-op (hold state)
                 end
             endcase
         end
     end
 endmodule
-
-
-====================================================================
->>> File: ./test/__init__.py
-====================================================================
-
-
-
-====================================================================
->>> File: ./test/helpers/format.py
-====================================================================
-
-from typing import List, Optional
-from .logger import logger
-
-def format_register(register: int) -> str:
-    if register < 13:
-        return f"R{register}"
-    if register == 13:
-        return f"%blockIdx"
-    if register == 14:
-        return f"%blockDim"
-    if register == 15:
-        return f"%threadIdx"
-    
-def format_instruction(instruction: str) -> str:
-    opcode = instruction[0:4]
-    rd = format_register(int(instruction[4:8], 2))
-    rs = format_register(int(instruction[8:12], 2))
-    rt = format_register(int(instruction[12:16], 2))
-    n = "N" if instruction[4] == 1 else ""
-    z = "Z" if instruction[5] == 1 else ""
-    p = "P" if instruction[6] == 1 else ""
-    imm = f"#{int(instruction[8:16], 2)}"
-
-    if opcode == "0000":
-        return "NOP"
-    elif opcode == "0001":
-        return f"BRnzp {n}{z}{p}, {imm}"
-    elif opcode == "0010":
-        return f"CMP {rs}, {rt}"
-    elif opcode == "0011":
-        return f"ADD {rd}, {rs}, {rt}"
-    elif opcode == "0100":
-        return f"SUB {rd}, {rs}, {rt}"
-    elif opcode == "0101":
-        return f"MUL {rd}, {rs}, {rt}"
-    elif opcode == "0110":
-        return f"DIV {rd}, {rs}, {rt}"
-    elif opcode == "0111":
-        return f"LDR {rd}, {rs}"
-    elif opcode == "1000":
-        return f"STR {rs}, {rt}"
-    elif opcode == "1001":
-        return f"CONST {rd}, {imm}"
-    elif opcode == "1111":
-        return "RET"
-    return "UNKNOWN"
-
-def format_core_state(core_state: str) -> str:
-    core_state_map = {
-        "000": "IDLE",
-        "001": "FETCH",
-        "010": "DECODE",
-        "011": "REQUEST",
-        "100": "WAIT",
-        "101": "EXECUTE",
-        "110": "UPDATE",
-        "111": "DONE"
-    }
-    return core_state_map[core_state]
-
-def format_fetcher_state(fetcher_state: str) -> str:
-    fetcher_state_map = {
-        "000": "IDLE",
-        "001": "FETCHING",
-        "010": "FETCHED"
-    }
-    return fetcher_state_map[fetcher_state]
-
-def format_lsu_state(lsu_state: str) -> str:
-    lsu_state_map = {
-        "00": "IDLE",
-        "01": "REQUESTING",
-        "10": "WAITING",
-        "11": "DONE"
-    }
-    return lsu_state_map[lsu_state]
-
-def format_memory_controller_state(controller_state: str) -> str:
-    controller_state_map = {
-        "000": "IDLE",
-        "010": "READ_WAITING",
-        "011": "WRITE_WAITING",
-        "100": "READ_RELAYING",
-        "101": "WRITE_RELAYING"
-    }
-    return controller_state_map[controller_state]
-
-def format_registers(registers: List[str]) -> str:
-    formatted_registers = []
-    for i, reg_value in enumerate(registers):
-        decimal_value = int(reg_value, 2)  # Convert binary string to decimal
-        reg_idx = 15 - i # Register data is provided in reverse order
-        formatted_registers.append(f"{format_register(reg_idx)} = {decimal_value}")
-    formatted_registers.reverse()
-    return ', '.join(formatted_registers)
-
-def format_cycle(dut, cycle_id: int, thread_id: Optional[int] = None):
-    logger.debug(f"\n================================== Cycle {cycle_id} ==================================")
-
-    for core in dut.cores:
-        # Not exactly accurate, but good enough for now
-        if int(str(dut.thread_count.value), 2) <= core.i.value * dut.THREADS_PER_BLOCK.value:
-            continue
-
-        logger.debug(f"\n+--------------------- Core {core.i.value} ---------------------+")
-
-        instruction = str(core.core_instance.instruction.value)
-        for thread in core.core_instance.threads:
-            if int(thread.i.value) < int(str(core.core_instance.thread_count.value), 2): # if enabled
-                block_idx = core.core_instance.block_id.value
-                block_dim = int(core.core_instance.THREADS_PER_BLOCK)
-                thread_idx = thread.register_instance.THREAD_ID.value
-                idx = block_idx * block_dim + thread_idx
-
-                rs = int(str(thread.register_instance.rs.value), 2)
-                rt = int(str(thread.register_instance.rt.value), 2)
-
-                reg_input_mux = int(str(core.core_instance.decoded_reg_input_mux.value), 2)
-                alu_out = int(str(thread.alu_instance.alu_out.value), 2)
-                lsu_out = int(str(thread.lsu_instance.lsu_out.value), 2)
-                constant = int(str(core.core_instance.decoded_immediate.value), 2)
-
-                if (thread_id is None or thread_id == idx):
-                    logger.debug(f"\n+-------- Thread {idx} --------+")
-
-                    logger.debug("PC:", int(str(core.core_instance.current_pc.value), 2))
-                    logger.debug("Instruction:", format_instruction(instruction))
-                    logger.debug("Core State:", format_core_state(str(core.core_instance.core_state.value)))
-                    logger.debug("Fetcher State:", format_fetcher_state(str(core.core_instance.fetcher_state.value)))
-                    logger.debug("LSU State:", format_lsu_state(str(thread.lsu_instance.lsu_state.value)))
-                    logger.debug("Registers:", format_registers([str(item.value) for item in thread.register_instance.registers]))
-                    logger.debug(f"RS = {rs}, RT = {rt}")
-
-                    if reg_input_mux == 0:
-                        logger.debug("ALU Out:", alu_out)
-                    if reg_input_mux == 1:
-                        logger.debug("LSU Out:", lsu_out)
-                    if reg_input_mux == 2:
-                        logger.debug("Constant:", constant)
-
-        logger.debug("Core Done:", str(core.core_instance.done.value))
-
-====================================================================
->>> File: ./test/helpers/logger.py
-====================================================================
-
-import datetime
-
-class Logger:
-    def __init__(self, level="debug"):
-        self.filename = f"test/logs/log_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.txt"
-        self.level = level
-
-    def debug(self, *messages):
-        if self.level == "debug":
-            self.info(*messages)
-
-    def info(self, *messages):
-        full_message = ' '.join(str(message) for message in messages)
-        with open(self.filename, "a") as log_file:
-            log_file.write(full_message + "\n")
-
-logger = Logger(level="debug")
-
-====================================================================
->>> File: ./test/helpers/memory.py
-====================================================================
-
-from typing import List
-from .logger import logger
-
-class Memory:
-    def __init__(self, dut, addr_bits, data_bits, channels, name):
-        self.dut = dut
-        self.addr_bits = addr_bits
-        self.data_bits = data_bits
-        self.memory = [0] * (2**addr_bits)
-        self.channels = channels
-        self.name = name
-
-        self.mem_read_valid = getattr(dut, f"{name}_mem_read_valid")
-        self.mem_read_address = getattr(dut, f"{name}_mem_read_address")
-        self.mem_read_ready = getattr(dut, f"{name}_mem_read_ready")
-        self.mem_read_data = getattr(dut, f"{name}_mem_read_data")
-
-        if name != "program":
-            self.mem_write_valid = getattr(dut, f"{name}_mem_write_valid")
-            self.mem_write_address = getattr(dut, f"{name}_mem_write_address")
-            self.mem_write_data = getattr(dut, f"{name}_mem_write_data")
-            self.mem_write_ready = getattr(dut, f"{name}_mem_write_ready")
-
-    def run(self):
-        mem_read_valid = [
-            int(str(self.mem_read_valid.value)[i:i+1], 2)
-            for i in range(0, len(str(self.mem_read_valid.value)), 1)
-        ]
-
-        mem_read_address = [
-            int(str(self.mem_read_address.value)[i:i+self.addr_bits], 2)
-            for i in range(0, len(str(self.mem_read_address.value)), self.addr_bits)
-        ]
-        mem_read_ready = [0] * self.channels
-        mem_read_data = [0] * self.channels
-
-        for i in range(self.channels):
-            if mem_read_valid[i] == 1:
-                mem_read_data[i] = self.memory[mem_read_address[i]]
-                mem_read_ready[i] = 1
-            else:
-                mem_read_ready[i] = 0
-
-        self.mem_read_data.value = int(''.join(format(d, '0' + str(self.data_bits) + 'b') for d in mem_read_data), 2)
-        self.mem_read_ready.value = int(''.join(format(r, '01b') for r in mem_read_ready), 2)
-
-        if self.name != "program":
-            mem_write_valid = [
-                int(str(self.mem_write_valid.value)[i:i+1], 2)
-                for i in range(0, len(str(self.mem_write_valid.value)), 1)
-            ]
-            mem_write_address = [
-                int(str(self.mem_write_address.value)[i:i+self.addr_bits], 2)
-                for i in range(0, len(str(self.mem_write_address.value)), self.addr_bits)
-            ]
-            mem_write_data = [
-                int(str(self.mem_write_data.value)[i:i+self.data_bits], 2)
-                for i in range(0, len(str(self.mem_write_data.value)), self.data_bits)
-            ]
-            mem_write_ready = [0] * self.channels
-
-            for i in range(self.channels):
-                if mem_write_valid[i] == 1:
-                    self.memory[mem_write_address[i]] = mem_write_data[i]
-                    mem_write_ready[i] = 1
-                else:
-                    mem_write_ready[i] = 0
-
-            self.mem_write_ready.value = int(''.join(format(w, '01b') for w in mem_write_ready), 2)
-
-    def write(self, address, data):
-        if address < len(self.memory):
-            self.memory[address] = data
-
-    def load(self, rows: List[int]):
-        for address, data in enumerate(rows):
-            self.write(address, data)
-
-    def display(self, rows, decimal=True):
-        logger.info("\n")
-        logger.info(f"{self.name.upper()} MEMORY")
-        
-        table_size = (8 * 2) + 3
-        logger.info("+" + "-" * (table_size - 3) + "+")
-
-        header = "| Addr | Data "
-        logger.info(header + " " * (table_size - len(header) - 1) + "|")
-
-        logger.info("+" + "-" * (table_size - 3) + "+")
-        for i, data in enumerate(self.memory):
-            if i < rows:
-                if decimal:
-                    row = f"| {i:<4} | {data:<4}"
-                    logger.info(row + " " * (table_size - len(row) - 1) + "|")
-                else:
-                    data_bin = format(data, f'0{16}b')
-                    row = f"| {i:<4} | {data_bin} |"
-                    logger.info(row + " " * (table_size - len(row) - 1) + "|")
-        logger.info("+" + "-" * (table_size - 3) + "+")
-
-====================================================================
->>> File: ./test/helpers/setup.py
-====================================================================
-
-from typing import List
-import cocotb
-from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge
-from .memory import Memory
-
-async def setup(
-    dut, 
-    program_memory: Memory, 
-    program: List[int],
-    data_memory: Memory,
-    data: List[int],
-    threads: int
-):
-    # Setup Clock
-    clock = Clock(dut.clk, 25, units="us")
-    cocotb.start_soon(clock.start())
-
-    # Reset
-    dut.reset.value = 1
-    await RisingEdge(dut.clk)
-    dut.reset.value = 0
-
-    # Load Program Memory
-    program_memory.load(program)
-
-    # Load Data Memory
-    data_memory.load(data)
-
-    # Device Control Register
-    dut.device_control_write_enable.value = 1
-    dut.device_control_data.value = threads
-    await RisingEdge(dut.clk)
-    dut.device_control_write_enable.value = 0
-
-    # Start
-    dut.start.value = 1
-
-
-====================================================================
->>> File: ./test/test_matadd.py
-====================================================================
-
-import cocotb
-from cocotb.triggers import RisingEdge
-from .helpers.setup import setup
-from .helpers.memory import Memory
-from .helpers.format import format_cycle
-from .helpers.logger import logger
-
-@cocotb.test()
-async def test_matadd(dut):
-    # Program Memory
-    program_memory = Memory(dut=dut, addr_bits=8, data_bits=16, channels=1, name="program")
-    program = [
-        0b0101000011011110, # MUL R0, %blockIdx, %blockDim
-        0b0011000000001111, # ADD R0, R0, %threadIdx         ; i = blockIdx * blockDim + threadIdx
-        0b1001000100000000, # CONST R1, #0                   ; baseA (matrix A base address)
-        0b1001001000001000, # CONST R2, #8                   ; baseB (matrix B base address)
-        0b1001001100010000, # CONST R3, #16                  ; baseC (matrix C base address)
-        0b0011010000010000, # ADD R4, R1, R0                 ; addr(A[i]) = baseA + i
-        0b0111010001000000, # LDR R4, R4                     ; load A[i] from global memory
-        0b0011010100100000, # ADD R5, R2, R0                 ; addr(B[i]) = baseB + i
-        0b0111010101010000, # LDR R5, R5                     ; load B[i] from global memory
-        0b0011011001000101, # ADD R6, R4, R5                 ; C[i] = A[i] + B[i]
-        0b0011011100110000, # ADD R7, R3, R0                 ; addr(C[i]) = baseC + i
-        0b1000000001110110, # STR R7, R6                     ; store C[i] in global memory
-        0b1111000000000000, # RET                            ; end of kernel
-    ]
-
-    # Data Memory
-    data_memory = Memory(dut=dut, addr_bits=8, data_bits=8, channels=4, name="data")
-    data = [
-        0, 1, 2, 3, 4, 5, 6, 7, # Matrix A (1 x 8)
-        0, 1, 2, 3, 4, 5, 6, 7  # Matrix B (1 x 8)
-    ]
-
-    # Device Control
-    threads = 8
-
-    await setup(
-        dut=dut,
-        program_memory=program_memory,
-        program=program,
-        data_memory=data_memory,
-        data=data,
-        threads=threads
-    )
-
-    data_memory.display(24)
-
-    cycles = 0
-    while dut.done.value != 1:
-        data_memory.run()
-        program_memory.run()
-
-        await cocotb.triggers.ReadOnly()
-        format_cycle(dut, cycles)
-        
-        await RisingEdge(dut.clk)
-        cycles += 1
-
-    logger.info(f"Completed in {cycles} cycles")
-    data_memory.display(24)
-
-    expected_results = [a + b for a, b in zip(data[0:8], data[8:16])]
-    for i, expected in enumerate(expected_results):
-        result = data_memory.memory[i + 16]
-        assert result == expected, f"Result mismatch at index {i}: expected {expected}, got {result}"
-
-====================================================================
->>> File: ./test/test_matmul.py
-====================================================================
-
-import cocotb
-from cocotb.triggers import RisingEdge
-from .helpers.setup import setup
-from .helpers.memory import Memory
-from .helpers.format import format_cycle
-from .helpers.logger import logger
-
-@cocotb.test()
-async def test_matadd(dut):
-    # Program Memory
-    program_memory = Memory(dut=dut, addr_bits=8, data_bits=16, channels=1, name="program")
-    program = [
-        0b0101000011011110, # MUL R0, %blockIdx, %blockDim
-        0b0011000000001111, # ADD R0, R0, %threadIdx         ; i = blockIdx * blockDim + threadIdx
-        0b1001000100000001, # CONST R1, #1                   ; increment
-        0b1001001000000010, # CONST R2, #2                   ; N (matrix inner dimension)
-        0b1001001100000000, # CONST R3, #0                   ; baseA (matrix A base address)
-        0b1001010000000100, # CONST R4, #4                   ; baseB (matrix B base address)
-        0b1001010100001000, # CONST R5, #8                   ; baseC (matrix C base address)
-        0b0110011000000010, # DIV R6, R0, R2                 ; row = i // N
-        0b0101011101100010, # MUL R7, R6, R2
-        0b0100011100000111, # SUB R7, R0, R7                 ; col = i % N
-        0b1001100000000000, # CONST R8, #0                   ; acc = 0
-        0b1001100100000000, # CONST R9, #0                   ; k = 0
-                            # LOOP:
-        0b0101101001100010, #   MUL R10, R6, R2
-        0b0011101010101001, #   ADD R10, R10, R9
-        0b0011101010100011, #   ADD R10, R10, R3             ; addr(A[i]) = row * N + k + baseA
-        0b0111101010100000, #   LDR R10, R10                 ; load A[i] from global memory
-        0b0101101110010010, #   MUL R11, R9, R2
-        0b0011101110110111, #   ADD R11, R11, R7
-        0b0011101110110100, #   ADD R11, R11, R4             ; addr(B[i]) = k * N + col + baseB
-        0b0111101110110000, #   LDR R11, R11                 ; load B[i] from global memory
-        0b0101110010101011, #   MUL R12, R10, R11
-        0b0011100010001100, #   ADD R8, R8, R12              ; acc = acc + A[i] * B[i]
-        0b0011100110010001, #   ADD R9, R9, R1               ; increment k
-        0b0010000010010010, #   CMP R9, R2
-        0b0001100000001100, #   BRn LOOP                     ; loop while k < N
-        0b0011100101010000, # ADD R9, R5, R0                 ; addr(C[i]) = baseC + i 
-        0b1000000010011000, # STR R9, R8                     ; store C[i] in global memory
-        0b1111000000000000  # RET                            ; end of kernel
-    ]
-
-    # Data Memory
-    data_memory = Memory(dut=dut, addr_bits=8, data_bits=8, channels=4, name="data")
-    data = [
-        1, 2, 3, 4, # Matrix A (2 x 2)
-        1, 2, 3, 4, # Matrix B (2 x 2)
-    ]
-
-    # Device Control
-    threads = 4
-
-    await setup(
-        dut=dut,
-        program_memory=program_memory,
-        program=program,
-        data_memory=data_memory,
-        data=data,
-        threads=threads
-    )
-
-    data_memory.display(12)
-
-    cycles = 0
-    while dut.done.value != 1:
-        data_memory.run()
-        program_memory.run()
-
-        await cocotb.triggers.ReadOnly()
-        format_cycle(dut, cycles, thread_id=1)
-        
-        await RisingEdge(dut.clk)
-        cycles += 1
-
-    logger.info(f"Completed in {cycles} cycles")
-    data_memory.display(12)
-
-
-    # Assuming the matrices are 2x2 and the result is stored starting at address 9
-    matrix_a = [data[0:2], data[2:4]]  # First matrix (2x2)
-    matrix_b = [data[4:6], data[6:8]]  # Second matrix (2x2)
-    expected_results = [
-        matrix_a[0][0] * matrix_b[0][0] + matrix_a[0][1] * matrix_b[1][0],  # C[0,0]
-        matrix_a[0][0] * matrix_b[0][1] + matrix_a[0][1] * matrix_b[1][1],  # C[0,1]
-        matrix_a[1][0] * matrix_b[0][0] + matrix_a[1][1] * matrix_b[1][0],  # C[1,0]
-        matrix_a[1][0] * matrix_b[0][1] + matrix_a[1][1] * matrix_b[1][1],  # C[1,1]
-    ]
-    for i, expected in enumerate(expected_results):
-        result = data_memory.memory[i + 8]  # Results start at address 9
-        assert result == expected, f"Result mismatch at index {i}: expected {expected}, got {result}"
 
 
