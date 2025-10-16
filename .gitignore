@@ -9,3 +9,4 @@ results.xml
 verilator/
 dump.vcd
 obj_dir/
+obj_uvm/

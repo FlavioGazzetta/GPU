@@ -76,16 +76,17 @@ clean:
 	@echo "🧹 Cleaning build directory..."
 	rm -rf $(OBJ_DIR) obj_uvm *.vcd *.fst *.log
 
+
 # ============================================================
-#  UVM-on-Verilator build
+#  UVM-on-Verilator build (CHIPS Alliance fork)
 # ============================================================
 
-# Where you cloned CHIPS Alliance UVM library:
+# Where you cloned CHIPS Alliance UVM-for-Verilator library:
 UVM_ROOT ?= $(PWD)/third_party/uvm
-UVM_INC  = +incdir+$(UVM_ROOT)/src
+UVM_INC  = -I$(UVM_ROOT)/src
 UVM_TOP  = $(UVM_ROOT)/src/uvm_pkg.sv
 
-# Testbench sources (no DUT files here; we still use your SRC_SV for RTL)
+# Testbench sources
 TB_SV = \
   tb/if/program_mem_if.sv \
   tb/if/data_mem_if.sv \
@@ -101,15 +102,16 @@ UVM_OBJ_DIR    = obj_uvm
 # Verilator flags for UVM (dynamic scheduler, timing)
 VERILATOR_UVM_FLAGS = \
   --sv --cc --exe --build \
-  -Wall -Wno-fatal -Wno-UNOPTFLAT -Wno-BLKANDNBLK \
+  -Wall -Wno-fatal -Wno-UNOPTFLAT -Wno-BLKANDNBLK -Wno-TIMESCALEMOD \
   --timing \
   --trace --trace-structs \
-  +define+VERILATOR \
   $(DEBUG_DEF) \
   -CFLAGS "-std=c++17 -O3 $(DEBUG_DEF)" \
   -LDFLAGS "-O3" \
-  -top-module $(UVM_TOP_MODULE)
-
+  -DVERILATOR=1 \
+  -DUVM_REGEX_NO_DPI \
+  -top-module $(UVM_TOP_MODULE) \
+  --Mdir $(UVM_OBJ_DIR)
 
 .PHONY: uvm uvm-debug uvm-nodebug
 
