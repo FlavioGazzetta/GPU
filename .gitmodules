@@ -1,0 +1,3 @@
+[submodule "third_party/uvm"]
+	path = third_party/uvm
+	url = https://github.com/chipsalliance/uvm-verilator
