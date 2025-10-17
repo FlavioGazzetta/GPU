@@ -1,0 +1,44 @@
+# Cocotb + Verilator runner
+TOPLEVEL_LANG ?= verilog
+SIM           ?= verilator
+
+TOPLEVEL      ?= tb_top_stub
+MODULE        ?= test_gpu
+
+VERILOG_SOURCES = \
+  ../dut/src/alu.sv \
+  ../dut/src/controller.sv \
+  ../dut/src/core.sv \
+  ../dut/src/dcr.sv \
+  ../dut/src/decoder.sv \
+  ../dut/src/dispatch.sv \
+  ../dut/src/fetcher.sv \
+  ../dut/src/lsu.sv \
+  ../dut/src/pc.sv \
+  ../dut/src/registers.sv \
+  ../dut/src/scheduler.sv \
+  ../dut/src/gpu.sv \
+  ../tb/top/tb_top_stub.sv
+
+WAVES ?= 0
+
+# We are compiling SystemVerilog
+EXTRA_ARGS += --sv
+
+# Keep timing + speed knobs
+EXTRA_ARGS += --timing --x-assign fast --x-initial fast --noassert
+
+# Be strict, but don't die on these common warnings
+EXTRA_ARGS += -Wall -Wno-UNOPTFLAT -Wno-BLKANDNBLK -Wno-TIMESCALEMOD
+EXTRA_ARGS += -Wno-PINCONNECTEMPTY -Wno-PROCASSINIT -Wno-UNUSEDPARAM -Wno-CASEINCOMPLETE
+
+# Waves (optional)
+EXTRA_ARGS += --trace-structs
+ifeq ($(WAVES),1)
+  EXTRA_ARGS += --trace
+endif
+EXTRA_ARGS += -j $(shell nproc)
+
+export VERILATOR_CFLAGS = -O3 -DNDEBUG -march=native -flto -fcoroutines -std=c++17
+
+include $(shell cocotb-config --makefiles)/Makefile.sim
