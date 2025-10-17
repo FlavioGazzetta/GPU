@@ -12,7 +12,7 @@ echo "# Generated on $(date)" >> "$OUTPUT_FILE"
 echo "" >> "$OUTPUT_FILE"
 
 # Find and process .py and .sv files only inside cpp/ and src/
-find dut/src -type f \( -name "*.cpp" -o -name "*.hpp" -o -name "*.sv" \) | sort | while read -r FILE; do
+find tests/ -type f \( -name "*.py" -o -name "*.cocotlb" \) | sort | while read -r FILE; do
     echo "Processing $FILE ..."
     {
         echo "===================================================================="

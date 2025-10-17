@@ -1,44 +1,33 @@
-# Cocotb + Verilator runner
+# Makefile.cocotb (Verilator)
+
 TOPLEVEL_LANG ?= verilog
-SIM           ?= verilator
+SIM            ?= verilator
+TOPLEVEL       ?= tb_top_stub
 
-TOPLEVEL      ?= tb_top_stub
-MODULE        ?= test_gpu
+# ---- IMPORTANT: don't set MODULE; use COCOTB_TEST_MODULES instead ----
+# MODULE is deprecated and will force test_gpu.py to run.
+# If nothing is provided, default to tests_uvm.
+COCOTB_TEST_MODULES ?= tests_uvm      # <— key line
 
-VERILOG_SOURCES = \
-  ../dut/src/alu.sv \
-  ../dut/src/controller.sv \
-  ../dut/src/core.sv \
-  ../dut/src/dcr.sv \
-  ../dut/src/decoder.sv \
-  ../dut/src/dispatch.sv \
-  ../dut/src/fetcher.sv \
-  ../dut/src/lsu.sv \
-  ../dut/src/pc.sv \
-  ../dut/src/registers.sv \
-  ../dut/src/scheduler.sv \
-  ../dut/src/gpu.sv \
-  ../tb/top/tb_top_stub.sv
-
-WAVES ?= 0
-
-# We are compiling SystemVerilog
-EXTRA_ARGS += --sv
-
-# Keep timing + speed knobs
-EXTRA_ARGS += --timing --x-assign fast --x-initial fast --noassert
-
-# Be strict, but don't die on these common warnings
+# Verilator compile flags (same as you had)
+EXTRA_ARGS += --sv --timing --x-assign fast --x-initial fast --noassert
 EXTRA_ARGS += -Wall -Wno-UNOPTFLAT -Wno-BLKANDNBLK -Wno-TIMESCALEMOD
 EXTRA_ARGS += -Wno-PINCONNECTEMPTY -Wno-PROCASSINIT -Wno-UNUSEDPARAM -Wno-CASEINCOMPLETE
+EXTRA_ARGS += --trace-structs -j $(shell nproc)
 
-# Waves (optional)
-EXTRA_ARGS += --trace-structs
-ifeq ($(WAVES),1)
-  EXTRA_ARGS += --trace
-endif
-EXTRA_ARGS += -j $(shell nproc)
-
-export VERILATOR_CFLAGS = -O3 -DNDEBUG -march=native -flto -fcoroutines -std=c++17
+# DUT sources (relative to this Makefile dir)
+VERILOG_SOURCES += ../dut/src/alu.sv \
+                   ../dut/src/controller.sv \
+                   ../dut/src/core.sv \
+                   ../dut/src/dcr.sv \
+                   ../dut/src/decoder.sv \
+                   ../dut/src/dispatch.sv \
+                   ../dut/src/fetcher.sv \
+                   ../dut/src/lsu.sv \
+                   ../dut/src/pc.sv \
+                   ../dut/src/registers.sv \
+                   ../dut/src/scheduler.sv \
+                   ../dut/src/gpu.sv \
+                   ../tb/top/tb_top_stub.sv
 
 include $(shell cocotb-config --makefiles)/Makefile.sim

@@ -3,8 +3,7 @@ import cocotb
 from cocotb.triggers import RisingEdge
 from program_rom import demo_program
 from pyuvm import uvm_root
-from uvm_env import GpuTest  # ensures class is imported/registered so run_test can find it
-
+from uvm_env import GpuTest  # ensure class is imported/registered so run_test can find it
 
 CLK_PERIOD_NS = 10  # matches tb_top_stub.sv clock
 
@@ -43,12 +42,8 @@ async def data_memory_model(dut, depth=256):
 
     while True:
         await RisingEdge(dut.clk)
-
-        # Packed vectors → ints
         read_valid_vec  = int(dut.data_mem_read_valid.value)
         write_valid_vec = int(dut.data_mem_write_valid.value)
-
-        # Default not ready; we’ll set bits if we service requests
         read_ready_vec  = 0
         write_ready_vec = 0
 
@@ -58,7 +53,6 @@ async def data_memory_model(dut, depth=256):
                 addr = int(dut.data_mem_read_address[ch].value) % depth
                 dut.data_mem_read_data[ch].value = mem[addr] & 0xFF
                 read_ready_vec |= (1 << ch)
-
         dut.data_mem_read_ready.value = read_ready_vec
 
         # Stores
@@ -68,7 +62,6 @@ async def data_memory_model(dut, depth=256):
                 data = int(dut.data_mem_write_data[ch].value) & 0xFF
                 mem[addr] = data
                 write_ready_vec |= (1 << ch)
-
         dut.data_mem_write_ready.value = write_ready_vec
 
 @cocotb.test()

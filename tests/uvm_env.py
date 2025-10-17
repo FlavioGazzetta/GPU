@@ -1,41 +1,99 @@
-from pyuvm import uvm_component, uvm_sequence, uvm_driver, uvm_env, uvm_test
+# tests/uvm_env.py
+from pyuvm import (
+    uvm_env, uvm_test, uvm_subscriber, uvm_component, ConfigDB
+)
+from agents import ProgramMemDriver, DataMemDriver
+from monitors import InstrMonitor, DataWriteMonitor
+from uvm_models import GpuCfg, ProgramMemModel, DataMemModel
 import cocotb
-from cocotb.triggers import RisingEdge, Event, Timer
 
-class DoneMonitor(uvm_component):
+
+class _RunCtl(uvm_component):
+    async def run_phase(self):
+        # keep the run phase alive for at least a tick
+        self.raise_objection()
+        import cocotb
+        from cocotb.triggers import Timer
+        await Timer(1, unit="ns")
+        self.drop_objection()
+
+class GpuScoreboard(uvm_subscriber):
+    """
+    Scoreboard implemented as a pyuvm uvm_subscriber.
+    Monitors connect their uvm_analysis_port to self.analysis_export.
+    """
     def build_phase(self):
-        self.done_seen = Event()
+        super().build_phase()
+        self.expected = {}   # addr -> data
+        self.seen     = {}   # addr -> data
+        self.runctl = _RunCtl("runctl", self)
 
-    async def run_phase(self):
-        dut = cocotb.top
-        while True:
-            await RisingEdge(dut.clk)
-            if int(dut.dut.done.value) == 1:
-                self.logger.info("done=1 observed")
-                self.done_seen.set()
-                return
+    def set_expected(self, exp_dict):
+        self.expected = dict(exp_dict)
 
-class GpuSeq(uvm_sequence):
-    async def body(self):
-        # sequences in pyuvm don't have .logger; keep it simple
-        # (or use print("Launching GPU run"))
-        return
+    def write(self, tr):
+        # tr is {"addr": a, "data": d} from DataWriteMonitor
+        a = tr["addr"]
+        d = tr["data"]
+        self.seen[a] = d
 
-class GpuDriver(uvm_driver):
-    async def run_phase(self):
-        await Timer(1, unit="ps")  # yield once
+    def check_phase(self):
+        # Verify expected writes at end of test
+        for a, d in self.expected.items():
+            got = self.seen.get(a, None)
+            assert got == d, f"Scoreboard mismatch at mem[{a}]: exp 0x{d:02x}, got {got}"
 
 class GpuEnv(uvm_env):
     def build_phase(self):
-        self.monitor = DoneMonitor("monitor", self)
-        self.driver  = GpuDriver("driver", self)
+        super().build_phase()
+
+        # Get DUT (fallback to cocotb.top if ConfigDB isn't set for this path)
+        try:
+            dut = ConfigDB().get(self, "", "dut")
+        except Exception:
+            dut = cocotb.top  # safe fallback
+
+        # Discover channel counts
+        num_prog_ch = len(dut.program_mem_read_address)
+        num_data_ch = len(dut.data_mem_read_address)
+
+        # Models + cfg
+        self.cfg        = GpuCfg(num_prog_ch=num_prog_ch, num_data_ch=num_data_ch)
+        self.prog_model = ProgramMemModel()
+        self.data_model = DataMemModel()
+
+        # Publish to children
+        for k, v in [
+            ("dut", dut),
+            ("cfg", self.cfg),
+            ("prog_model", self.prog_model),
+            ("data_model", self.data_model),
+        ]:
+            ConfigDB().set(self, "*", k, v)
+
+        # Components
+        self.pm_drv    = ProgramMemDriver("pm_drv", self)
+        self.dm_drv    = DataMemDriver("dm_drv", self)
+        self.instr_mon = InstrMonitor("instr_mon", self)
+        self.dw_mon    = DataWriteMonitor("dw_mon", self)
+        self.sb        = GpuScoreboard("sb", self)
+
+    def connect_phase(self):
+        # Move connects here so child build_phase has completed
+        self.dw_mon.ap.connect(self.sb.analysis_export)
+        # instr_mon feeds coverage via coverage.sample_cov (optional, handled in monitors)
 
 class GpuTest(uvm_test):
+    """Base UVM test that builds env; subclasses implement do_run()."""
     def build_phase(self):
+        super().build_phase()
         self.env = GpuEnv("env", self)
 
-    async def run_phase(self):
-        seq = GpuSeq.create("seq")
-        await seq.start(None)
-        await self.env.monitor.done_seen.wait()
-        self.logger.info("GPU completed")
+        # Ensure 'dut' is visible from this test scope downward even if the
+        # cocotb-side prep ran before the UVM tree existed.
+        try:
+            _ = ConfigDB().get(self, "", "dut")
+        except Exception:
+            dut = cocotb.top
+            ConfigDB().set(self, "*", "dut", dut)
+
