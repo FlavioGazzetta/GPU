@@ -1,853 +1,1596 @@
 # Combined source code dump
-# Generated on Sat Oct 18 01:40:47 BST 2025
+# Generated on Sat Oct 18 02:17:22 BST 2025
 
 ====================================================================
->>> File: tests/agents.py
+>>> File: dut/src/alu.sv
 ====================================================================
 
-from pyuvm import uvm_driver, ConfigDB
-import cocotb
-from cocotb.triggers import RisingEdge
+`default_nettype none
+`timescale 1ns/1ns
 
-class ProgramMemDriver(uvm_driver):
-    def build_phase(self):
-        super().build_phase()
-        self.cdbus = ConfigDB().get(self, "", "dut")         # HDL top
-        self.cfg   = ConfigDB().get(self, "", "cfg")         # config (channels, depth)
-        self.model = ConfigDB().get(self, "", "prog_model")  # program ROM model
+// ARITHMETIC-LOGIC UNIT
+// > Executes computations on register values
+// > In this minimal implementation, the ALU supports the 4 basic arithmetic operations
+// > Each thread in each core has it's own ALU
+// > ADD, SUB, MUL, DIV instructions are all executed here
+module alu (
+    input  logic        clk,
+    input  logic        reset,
+    input  logic        enable, // If current block has less threads then block size, some ALUs will be inactive
 
-    async def run_phase(self):
-        dut = self.cdbus
-        while True:
-            await RisingEdge(dut.clk)
+    input  logic [2:0]  core_state,
 
-            rv = int(dut.program_mem_read_valid.value)
+    input  logic [1:0]  decoded_alu_arithmetic_mux,
+    input  logic        decoded_alu_output_mux,
 
-            # Determine if ready is a single bit or a bus
-            try:
-                ready_width = dut.program_mem_read_ready.value.n_bits
-            except Exception:
-                # Fallback if n_bits not available; assume 1-bit
-                ready_width = 1
+    input  logic [7:0]  rs,
+    input  logic [7:0]  rt,
+    output logic [7:0]  alu_out
+);
+    localparam logic [1:0] ADD = 2'b00,
+                           SUB = 2'b01,
+                           MUL = 2'b10,
+                           DIV = 2'b11;
 
-            ready_mask = 0
-
-            for ch in range(self.cfg.num_prog_ch):
-                if (rv >> ch) & 1:
-                    addr = int(dut.program_mem_read_address[ch].value)
-                    data, latency = self.model.fetch(addr)
-
-                    for _ in range(latency):
-                        await RisingEdge(dut.clk)
-
-                    # data bus *is* an array per your TB
-                    dut.program_mem_read_data[ch].value = data & 0xFFFF
-                    ready_mask |= (1 << ch)
-
-            # Drive ready correctly whether it's 1-bit or multi-bit
-            if ready_width == 1:
-                dut.program_mem_read_ready.value = 1 if ready_mask else 0
-            else:
-                dut.program_mem_read_ready.value = ready_mask
-
-
-# tests/agents.py
-class DataMemDriver(uvm_driver):
-    def build_phase(self):
-        super().build_phase()
-        self.cdbus = ConfigDB().get(self, "", "dut")
-        self.cfg   = ConfigDB().get(self, "", "cfg")
-        self.model = ConfigDB().get(self, "", "data_model")
-
-    async def run_phase(self):
-        dut = self.cdbus
-        while True:
-            await RisingEdge(dut.clk)
-
-            # packed valid vectors -> read as ints
-            rbits = int(dut.data_mem_read_valid.value)
-            wbits = int(dut.data_mem_write_valid.value)
-
-            # determine ready widths (1 if scalar)
-            def width_of(sig):
-                try:
-                    return sig.value.n_bits
-                except Exception:
-                    return 1
-
-            rready_w = width_of(dut.data_mem_read_ready)
-            wready_w = width_of(dut.data_mem_write_ready)
-
-            read_ready_mask  = 0
-            write_ready_mask = 0
-
-            # READS
-            for ch in range(self.cfg.num_data_ch):
-                if (rbits >> ch) & 1:
-                    a = int(dut.data_mem_read_address[ch].value)
-                    d, lat = self.model.read(a)
-                    for _ in range(lat):
-                        await RisingEdge(dut.clk)
-                    dut.data_mem_read_data[ch].value = d & 0xFF
-                    read_ready_mask |= (1 << ch)
-
-            # WRITES
-            for ch in range(self.cfg.num_data_ch):
-                if (wbits >> ch) & 1:
-                    a = int(dut.data_mem_write_address[ch].value)
-                    d = int(dut.data_mem_write_data[ch].value)
-
-                    # ---- DEBUG echo so you can correlate LSU capture -> bus request ----
-                    dut._log.info(f"[DRV][WR-REQ] ch={ch} addr={a & 0xFF:02x} data={d & 0xFF:02x}")
-
-                    lat = self.model.write(a, d)
-                    for _ in range(lat):
-                        await RisingEdge(dut.clk)
-                    write_ready_mask |= (1 << ch)
-
-            # drive whole packed ready signals (handle 1-bit case)
-            dut.data_mem_read_ready.value  = 1 if (rready_w == 1 and read_ready_mask)  else read_ready_mask
-            dut.data_mem_write_ready.value = 1 if (wready_w == 1 and write_ready_mask) else write_ready_mask
+    // Sequential update, identical behavior to original
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            alu_out <= 8'b0;
+        end else if (enable) begin
+            // Calculate alu_out when core_state = EXECUTE
+            if (core_state == 3'b101) begin
+                if (decoded_alu_output_mux == 1'b1) begin
+                    // Signed compare for CMP → NZP in alu_out[2:0]
+                    logic signed [8:0] diff;
+                    diff = $signed({1'b0, rs}) - $signed({1'b0, rt});
+                    alu_out <= {5'b0, (diff > 0), (diff == 0), (diff < 0)};
+                end else begin
+                    // Execute the specified arithmetic instruction
+                    case (decoded_alu_arithmetic_mux)
+                        ADD: alu_out <= rs + rt;
+                        SUB: alu_out <= rs - rt;
+                        MUL: alu_out <= rs * rt;
+                        DIV: alu_out <= rs / rt;
+                        default: alu_out <= alu_out; // hold value (no behavior change)
+                    endcase
+                end
+            end
+        end
+    end
+endmodule
 
 
 ====================================================================
->>> File: tests/coverage.py
+>>> File: dut/src/controller.sv
 ====================================================================
 
-# tests/coverage.py
-"""
-Functional coverage hooks.
-- If cocotb-coverage is installed, we record bins and can export YAML.
-- If not installed, everything becomes a no-op so tests still run.
-"""
+`default_nettype none
+`timescale 1ns/1ns
 
-try:
-    from cocotb_coverage.coverage import CoverPoint, CoverCross, coverage_db
-    _HAS_COV = True
-except Exception:
-    _HAS_COV = False
+// MEMORY CONTROLLER
+// > Receives memory requests from all cores
+// > Throttles requests based on limited external memory bandwidth
+// > Waits for responses from external memory and distributes them back to cores
+module controller #(
+    parameter int ADDR_BITS     = 8,
+    parameter int DATA_BITS     = 16,
+    parameter int NUM_CONSUMERS = 4, // The number of consumers accessing memory through this controller
+    parameter int NUM_CHANNELS  = 1, // The number of concurrent channels available to send requests to global memory
+    parameter bit WRITE_ENABLE  = 1  // Whether this memory controller can write to memory (program memory is read-only)
+) (
+    input  logic clk,
+    input  logic reset,
 
-    # no-op fallbacks
-    def CoverPoint(*args, **kwargs):
-        def deco(f): return f
-        return deco
+    // Consumer Interface (Fetchers / LSUs)
+    input  logic [NUM_CONSUMERS-1:0]                        consumer_read_valid,
+    input  logic [ADDR_BITS-1:0]                            consumer_read_address [NUM_CONSUMERS],
+    output logic [NUM_CONSUMERS-1:0]                        consumer_read_ready,
+    output logic [DATA_BITS-1:0]                            consumer_read_data   [NUM_CONSUMERS],
+    input  logic [NUM_CONSUMERS-1:0]                        consumer_write_valid,
+    input  logic [ADDR_BITS-1:0]                            consumer_write_address[NUM_CONSUMERS],
+    input  logic [DATA_BITS-1:0]                            consumer_write_data  [NUM_CONSUMERS],
+    output logic [NUM_CONSUMERS-1:0]                        consumer_write_ready,
 
-    def CoverCross(*args, **kwargs):
-        def deco(f): return f
-        return deco
+    // Memory Interface (Data / Program)
+    output logic [NUM_CHANNELS-1:0]                         mem_read_valid,
+    output logic [ADDR_BITS-1:0]                            mem_read_address [NUM_CHANNELS],
+    input  logic [NUM_CHANNELS-1:0]                         mem_read_ready,
+    input  logic [DATA_BITS-1:0]                            mem_read_data   [NUM_CHANNELS],
+    output logic [NUM_CHANNELS-1:0]                         mem_write_valid,
+    output logic [ADDR_BITS-1:0]                            mem_write_address[NUM_CHANNELS],
+    output logic [DATA_BITS-1:0]                            mem_write_data  [NUM_CHANNELS],
+    input  logic [NUM_CHANNELS-1:0]                         mem_write_ready
+);
+    localparam logic [2:0] IDLE          = 3'b000,
+                           READ_WAITING  = 3'b010,
+                           WRITE_WAITING = 3'b011,
+                           READ_RELAYING = 3'b100,
+                           WRITE_RELAYING= 3'b101;
 
-    class _CovDB:
-        def export_to_yaml(self, path):
-            # create a tiny placeholder so downstream scripts don't break
-            with open(path, "w") as f:
-                f.write("# coverage disabled (cocotb-coverage not installed)\n")
-    coverage_db = _CovDB()
+    // Keep track of state for each channel and which jobs each channel is handling
+    logic [2:0] controller_state [NUM_CHANNELS];
+    logic [$clog2(NUM_CONSUMERS)-1:0] current_consumer [NUM_CHANNELS]; // Which consumer is each channel currently serving
+    logic [NUM_CONSUMERS-1:0]         channel_serving_consumer;        // Which consumers are being served (one channel each)
 
-# ---- Points ----
-@CoverPoint("gpu.opcode",
-            xf=lambda s: s.opcode, bins=list(range(0x0, 0x10)))
-def cp_opcode(s): pass
+    // Sequential logic only; no behavior changes
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            mem_read_valid  <= '0;
+            mem_write_valid <= '0;
+            consumer_read_ready  <= '0;
+            consumer_write_ready <= '0;
+            channel_serving_consumer <= '0;
 
-@CoverPoint("gpu.branch.outcome",
-            xf=lambda s: s.nzp_outcome, bins=["N","Z","P","NZ","NP","ZP"])
-def cp_branch(s): pass
+            // Zero unpacked arrays with foreach (required for SV/Verilator)
+            foreach (mem_read_address[i])   mem_read_address[i]   <= '0;
+            foreach (mem_write_address[i])  mem_write_address[i]  <= '0;
+            foreach (mem_write_data[i])     mem_write_data[i]     <= '0;
+            foreach (consumer_read_data[i]) consumer_read_data[i] <= '0;
 
-@CoverCross("gpu.branch.cross", items=[cp_opcode, cp_branch])
-def cross_branch(s): pass
+            foreach (current_consumer[i])   current_consumer[i]   <= '0;
+            foreach (controller_state[i])   controller_state[i]   <= '0; // IDLE == 3'b000
+        end else begin
+            // For each channel, we handle processing concurrently
+            for (int i = 0; i < NUM_CHANNELS; i++) begin
+                unique case (controller_state[i])
+                    IDLE: begin
+                        // While this channel is idle, cycle through consumers looking for one with a pending request
+                        for (int j = 0; j < NUM_CONSUMERS; j++) begin
+                            if (consumer_read_valid[j] && !channel_serving_consumer[j]) begin
+                                channel_serving_consumer[j] <= 1'b1;
+                                // width-safe cast of loop index
+                                current_consumer[i]         <= $bits(current_consumer[i])'(j);
 
-def sample_cov(sample):
-    # sample is a SimpleNamespace with at least: opcode, is_branch, [nzp_outcome]
-    cp_opcode(sample)
-    if getattr(sample, "is_branch", False):
-        if getattr(sample, "nzp_outcome", None) is not None:
-            cp_branch(sample)
-            cross_branch(sample)
+                                mem_read_valid[i]           <= 1'b1;
+                                mem_read_address[i]         <= consumer_read_address[j];
+                                controller_state[i]         <= READ_WAITING;
 
-def report_cov():
-    # Always writes a file; it will be a stub when coverage is disabled
-    coverage_db.export_to_yaml("coverage.yml")
+                                // Once we find a pending request, pick it up with this channel and stop looking for requests
+                                break;
+                            end else if (consumer_write_valid[j] && !channel_serving_consumer[j]) begin
+                                channel_serving_consumer[j] <= 1'b1;
+                                // width-safe cast of loop index
+                                current_consumer[i]         <= $bits(current_consumer[i])'(j);
 
+                                mem_write_valid[i]          <= 1'b1;
+                                mem_write_address[i]        <= consumer_write_address[j];
+                                mem_write_data[i]           <= consumer_write_data[j];
+                                controller_state[i]         <= WRITE_WAITING;
 
-====================================================================
->>> File: tests/env.py
-====================================================================
+                                // Once we find a pending request, pick it up with this channel and stop looking for requests
+                                break;
+                            end
+                        end
+                    end
 
-# tests/env.py
-from uvm_env import *  # re-export to keep both import paths working
+                    READ_WAITING: begin
+                        // Wait for response from memory for pending read request
+                        if (mem_read_ready[i]) begin
+                            mem_read_valid[i]                          <= 1'b0;
+                            consumer_read_ready[current_consumer[i]]   <= 1'b1;
+                            consumer_read_data[current_consumer[i]]    <= mem_read_data[i];
+                            controller_state[i]                        <= READ_RELAYING;
+                        end
+                    end
 
+                    WRITE_WAITING: begin
+                        // Wait for response from memory for pending write request
+                        if (mem_write_ready[i]) begin
+                            mem_write_valid[i]                         <= 1'b0;
+                            consumer_write_ready[current_consumer[i]]  <= 1'b1;
+                            controller_state[i]                        <= WRITE_RELAYING;
+                        end
+                    end
 
-====================================================================
->>> File: tests/monitors.py
-====================================================================
+                    // Wait until consumer acknowledges it received response, then reset
+                    READ_RELAYING: begin
+                        if (!consumer_read_valid[current_consumer[i]]) begin
+                            channel_serving_consumer[current_consumer[i]] <= 1'b0;
+                            consumer_read_ready[current_consumer[i]]      <= 1'b0;
+                            controller_state[i]                           <= IDLE;
+                        end
+                    end
 
-# tests/monitors.py
-from pyuvm import uvm_component, uvm_analysis_port, ConfigDB
-import cocotb
-from cocotb.triggers import RisingEdge
-from types import SimpleNamespace
-from coverage import sample_cov  # falls back to no-op if not installed
-
-class InstrMonitor(uvm_component):
-    def build_phase(self):
-        super().build_phase()
-        self.dut = ConfigDB().get(self, "", "dut")
-        self.ap  = uvm_analysis_port("ap", self)
-
-    async def run_phase(self):
-        dut = self.dut
-        ch = 0
-        while True:
-            await RisingEdge(dut.clk)
-            # top-level bus (tb_top_stub) is 1-channel for program mem
-            rv = int(dut.program_mem_read_valid.value)
-            rr = int(dut.program_mem_read_ready.value)
-            if (rv & 1) and (rr & 1):
-                pc     = int(dut.program_mem_read_address[ch].value) & 0xFF
-                instr  = int(dut.program_mem_read_data[ch].value) & 0xFFFF
-                opcode = (instr >> 12) & 0xF
-                sample = SimpleNamespace(opcode=opcode, is_branch=(opcode == 0x1), nzp_outcome=None)
-                sample_cov(sample)
-                self.ap.write({"pc": pc, "instr": instr, "opcode": opcode})
-
-class DataWriteMonitor(uvm_component):
-    def build_phase(self):
-        super().build_phase()
-        self.dut = ConfigDB().get(self, "", "dut")
-        self.ap  = uvm_analysis_port("ap", self)
-
-    async def run_phase(self):
-        dut = self.dut
-        NUM_CH = len(dut.data_mem_write_address)
-        while True:
-            await RisingEdge(dut.clk)
-            wv = int(dut.data_mem_write_valid.value)
-            wr = int(dut.data_mem_write_ready.value)
-            for ch in range(NUM_CH):
-                if ((wv >> ch) & 1) and ((wr >> ch) & 1):
-                    addr = int(dut.data_mem_write_address[ch].value) & 0xFF
-                    data = int(dut.data_mem_write_data[ch].value) & 0xFF
-                    self.ap.write({"addr": addr, "data": data, "ch": ch})
-
-
-====================================================================
->>> File: tests/program_rom.py
-====================================================================
-
-# tests/program_rom.py
-# Opcodes per your decoder
-NOP, BRNZP, CMP, ADD, SUB, MUL, DIV, LDR, STR, CONST, RET = \
-    0x0, 0x1,   0x2, 0x3, 0x4, 0x5, 0x6,  0x7, 0x8,  0x9,   0xF
-
-def enc(op, rd=0, rs=0, rt=0, imm8=0):
-    """Encode 16b instruction: [15:12]=op, [11:8]=rd, [7:4]=rs, [3:0]=rt
-       For CONST/BRnzp we’ll also use imm8 in [7:0] (your decoder reads that)."""
-    return ((op & 0xF) << 12) | ((rd & 0xF) << 8) | ((rs & 0xF) << 4) | (rt & 0xF) | ((imm8 & 0xFF) << 0)
-
-def demo_program():
-    prog = [0] * 256
-    # CONST R1, #5  (rd=1, imm=5)
-    prog[0] = enc(CONST, rd=1, imm8=5)
-    # ADD R2, R1, R1
-    prog[1] = enc(ADD, rd=2, rs=1, rt=1)
-    # RET
-    prog[2] = enc(RET)
-    return prog
-
-
-====================================================================
->>> File: tests/test_gpu.py
-====================================================================
-
-# tests/test_gpu.py
-import cocotb
-from cocotb.triggers import RisingEdge
-from program_rom import demo_program
-from pyuvm import uvm_root
-from uvm_env import GpuTest  # ensure class is imported/registered so run_test can find it
-
-CLK_PERIOD_NS = 10  # matches tb_top_stub.sv clock
-
-async def reset_and_config(dut, threads=4):
-    # Wait a few cycles, then release reset driven in tb_top_stub
-    for _ in range(5):
-        await RisingEdge(dut.clk)
-    dut.reset.value = 0
-
-    # Write DCR (thread_count)
-    dut.device_control_write_enable.value = 1
-    dut.device_control_data.value = threads
-    await RisingEdge(dut.clk)
-    dut.device_control_write_enable.value = 0
-
-async def start_kernel(dut):
-    dut.start.value = 1
-    await RisingEdge(dut.clk)
-    dut.start.value = 0
-
-async def program_memory_model(dut, program):
-    ch = 0
-    while True:
-        await RisingEdge(dut.clk)
-        if int(dut.program_mem_read_valid.value) == 1:
-            addr = int(dut.program_mem_read_address[ch].value)
-            dut.program_mem_read_data[ch].value = program[addr] & 0xFFFF
-            dut.program_mem_read_ready.value = 1
-        else:
-            dut.program_mem_read_ready.value = 0
-
-async def data_memory_model(dut, depth=256):
-    """Multi-channel data memory model: handle packed valid/ready vectors."""
-    NUM_CH = len(dut.data_mem_read_address)
-    mem = [0] * depth
-
-    while True:
-        await RisingEdge(dut.clk)
-        read_valid_vec  = int(dut.data_mem_read_valid.value)
-        write_valid_vec = int(dut.data_mem_write_valid.value)
-        read_ready_vec  = 0
-        write_ready_vec = 0
-
-        # Loads
-        for ch in range(NUM_CH):
-            if (read_valid_vec >> ch) & 1:
-                addr = int(dut.data_mem_read_address[ch].value) % depth
-                dut.data_mem_read_data[ch].value = mem[addr] & 0xFF
-                read_ready_vec |= (1 << ch)
-        dut.data_mem_read_ready.value = read_ready_vec
-
-        # Stores
-        for ch in range(NUM_CH):
-            if (write_valid_vec >> ch) & 1:
-                addr = int(dut.data_mem_write_address[ch].value) % depth
-                data = int(dut.data_mem_write_data[ch].value) & 0xFF
-                mem[addr] = data
-                write_ready_vec |= (1 << ch)
-        dut.data_mem_write_ready.value = write_ready_vec
-
-@cocotb.test()
-async def gpu_smoke(dut):
-    # Clean initial drives
-    dut.start.value = 0
-    dut.device_control_write_enable.value = 0
-
-    # Preload program ROM
-    program = demo_program()
-
-    # Start memory models
-    cocotb.start_soon(program_memory_model(dut, program))
-    cocotb.start_soon(data_memory_model(dut))
-
-    # Release reset & configure
-    await reset_and_config(dut, threads=4)
-
-    # Kick off kernel
-    await start_kernel(dut)
-
-    # Run the registered PyUVM test by name (GpuTest is imported above)
-    await uvm_root().run_test("GpuTest")
-
-    # A small grace period
-    for _ in range(5):
-        await RisingEdge(dut.clk)
-
-    dut._log.info("✅ Smoke test finished")
+                    WRITE_RELAYING: begin
+                        if (!consumer_write_valid[current_consumer[i]]) begin
+                            channel_serving_consumer[current_consumer[i]] <= 1'b0;
+                            consumer_write_ready[current_consumer[i]]      <= 1'b0;
+                            controller_state[i]                            <= IDLE;
+                        end
+                    end
+                endcase
+            end
+        end
+    end
+endmodule
 
 
 ====================================================================
->>> File: tests/tests_uvm.py
+>>> File: dut/src/core.sv
 ====================================================================
 
-import cocotb
-from pyuvm import uvm_root, ConfigDB
+`default_nettype none
+`timescale 1ns/1ns
 
-# Pull in the UVM tests (classes) so pyuvm can construct them by name
-from uvm_sequences import (
-    TestALU,
-    TestLSU,
-    TestBranchTaken,
-    TestBranchNotTaken,
-    TestTailThreads,
-    TestControllerLatency,
-    #TestPrefetch,
-)
+// COMPUTE CORE
+// > Handles processing 1 block at a time
+// > The core also has its own scheduler to manage control flow
+// > Each core contains 1 fetcher & decoder, and register files, ALUs, LSUs, PC for each thread
+module core #(
+    parameter int DATA_MEM_ADDR_BITS     = 8,
+    parameter int DATA_MEM_DATA_BITS     = 8,
+    parameter int PROGRAM_MEM_ADDR_BITS  = 8,
+    parameter int PROGRAM_MEM_DATA_BITS  = 16,
+    parameter int THREADS_PER_BLOCK      = 4
+) (
+    input  logic clk,
+    input  logic reset,
 
-def _prep(dut):
-    # Make DUT visible to all descendants; set at multiple scopes for safety.
-    ConfigDB().set(None, "*", "dut", dut)
-    ConfigDB().set(None, "uvm_test_top", "dut", dut)
-    ConfigDB().set(None, "uvm_test_top.*", "dut", dut)
+    // Kernel Execution
+    input  logic start,
+    output logic done,
 
-@cocotb.test()
-async def uvm_alu(dut):
-    _prep(dut)
-    await uvm_root().run_test("TestALU")
+    // Block Metadata
+    input  logic [7:0] block_id,
+    input  logic [$clog2(THREADS_PER_BLOCK):0] thread_count,
 
-@cocotb.test()
-async def uvm_lsu(dut):
-    _prep(dut)
-    await uvm_root().run_test("TestLSU")
+    // Program Memory
+    output logic                             program_mem_read_valid,
+    output logic [PROGRAM_MEM_ADDR_BITS-1:0] program_mem_read_address,
+    input  logic                             program_mem_read_ready,
+    input  logic [PROGRAM_MEM_DATA_BITS-1:0] program_mem_read_data,
 
-@cocotb.test()
-async def uvm_branch_taken(dut):
-    _prep(dut)
-    await uvm_root().run_test("TestBranchTaken")
+    // Data Memory
+    output logic [THREADS_PER_BLOCK-1:0]                       data_mem_read_valid,
+    output logic [DATA_MEM_ADDR_BITS-1:0]                      data_mem_read_address [THREADS_PER_BLOCK],
+    input  logic [THREADS_PER_BLOCK-1:0]                       data_mem_read_ready,
+    input  logic [DATA_MEM_DATA_BITS-1:0]                      data_mem_read_data   [THREADS_PER_BLOCK],
+    output logic [THREADS_PER_BLOCK-1:0]                       data_mem_write_valid,
+    output logic [DATA_MEM_ADDR_BITS-1:0]                      data_mem_write_address[THREADS_PER_BLOCK],
+    output logic [DATA_MEM_DATA_BITS-1:0]                      data_mem_write_data  [THREADS_PER_BLOCK],
+    input  logic [THREADS_PER_BLOCK-1:0]                       data_mem_write_ready
+);
+    // ========= Core-wide state =========
+    logic [2:0]  core_state;
+    logic [2:0]  fetcher_state;
+    logic [15:0] instruction;
 
-@cocotb.test()
-async def uvm_branch_not_taken(dut):
-    _prep(dut)
-    await uvm_root().run_test("TestBranchNotTaken")
+    // ========= Inter-thread bundles =========
+    // NOTE: Only ONE thread may drive current_pc (see below).
+    logic [7:0] current_pc;
 
-@cocotb.test()
-async def uvm_tail_threads(dut):
-    _prep(dut)
-    await uvm_root().run_test("TestTailThreads")
+    logic [7:0] next_pc [THREADS_PER_BLOCK];
+    logic [7:0] rs      [THREADS_PER_BLOCK];
+    logic [7:0] rt      [THREADS_PER_BLOCK];
+    logic [1:0] lsu_state [THREADS_PER_BLOCK];
+    logic [7:0] lsu_out   [THREADS_PER_BLOCK];
+    logic [7:0] alu_out   [THREADS_PER_BLOCK];
 
-@cocotb.test()
-async def uvm_ctrl_latency(dut):
-    _prep(dut)
-    await uvm_root().run_test("TestControllerLatency")
+    // For “other” threads’ current_pc outputs (to avoid multiple drivers)
+    logic [7:0] current_pc_unused [THREADS_PER_BLOCK];
 
-# @cocotb.test()
-# async def uvm_prefetch(dut):
-#     _prep(dut)
-#     await uvm_root().run_test("TestPrefetch")
+    // ========= Decoded Instruction =========
+    logic [3:0] decoded_rd_address;
+    logic [3:0] decoded_rs_address;
+    logic [3:0] decoded_rt_address;
+    logic [2:0] decoded_nzp;
+    logic [7:0] decoded_immediate;
 
+    // Decoded Control
+    logic       decoded_reg_write_enable;         // writeback enable
+    logic       decoded_mem_read_enable;          // LSU read
+    logic       decoded_mem_write_enable;         // LSU write
+    logic       decoded_nzp_write_enable;         // NZP write
+    logic [1:0] decoded_reg_input_mux;            // writeback mux
+    logic [1:0] decoded_alu_arithmetic_mux;       // ALU arithmetic op
+    logic       decoded_alu_output_mux;           // ALU select (arith vs pass)
+    logic       decoded_pc_mux;                   // PC select (seq vs branch/jump)
+    logic       decoded_ret;                      // RET (kernel return)
 
-====================================================================
->>> File: tests/uvm_env.py
-====================================================================
+    // Speculative prefetch hint
+    logic        spec_en;
+    logic [7:0]  spec_pc;
 
-# tests/uvm_env.py
-from pyuvm import (
-    uvm_env, uvm_test, uvm_subscriber, uvm_component, ConfigDB
-)
-from agents import ProgramMemDriver, DataMemDriver
-from monitors import InstrMonitor, DataWriteMonitor
-from uvm_models import GpuCfg, ProgramMemModel, DataMemModel
-import cocotb
+    // ========= Fetcher =========
+    fetcher #(
+        .PROGRAM_MEM_ADDR_BITS(PROGRAM_MEM_ADDR_BITS),
+        .PROGRAM_MEM_DATA_BITS(PROGRAM_MEM_DATA_BITS)
+    ) fetcher_instance (
+        .clk(clk),
+        .reset(reset),
+        .spec_en(spec_en),
+        .spec_pc(spec_pc),
+        .core_state(core_state),
+        .current_pc(current_pc),
+        .mem_read_valid(program_mem_read_valid),
+        .mem_read_address(program_mem_read_address),
+        .mem_read_ready(program_mem_read_ready),
+        .mem_read_data(program_mem_read_data),
+        .fetcher_state(fetcher_state),
+        .instruction(instruction)
+    );
 
+    // ========= Decoder =========
+    decoder decoder_instance (
+        .clk(clk),
+        .reset(reset),
+        .core_state(core_state),
+        .instruction(instruction),
+        .decoded_rd_address(decoded_rd_address),
+        .decoded_rs_address(decoded_rs_address),
+        .decoded_rt_address(decoded_rt_address),
+        .decoded_nzp(decoded_nzp),
+        .decoded_immediate(decoded_immediate),
+        .decoded_reg_write_enable(decoded_reg_write_enable),
+        .decoded_mem_read_enable(decoded_mem_read_enable),
+        .decoded_mem_write_enable(decoded_mem_write_enable),
+        .decoded_nzp_write_enable(decoded_nzp_write_enable),
+        .decoded_reg_input_mux(decoded_reg_input_mux),
+        .decoded_alu_arithmetic_mux(decoded_alu_arithmetic_mux),
+        .decoded_alu_output_mux(decoded_alu_output_mux),
+        .decoded_pc_mux(decoded_pc_mux),
+        .decoded_ret(decoded_ret)
+    );
 
-class _RunCtl(uvm_component):
-    async def run_phase(self):
-        # keep the run phase alive for at least a tick
-        self.raise_objection()
-        import cocotb
-        from cocotb.triggers import Timer
-        await Timer(1, unit="ns")
-        self.drop_objection()
+    // ========= Scheduler =========
+    scheduler #(
+        .THREADS_PER_BLOCK(THREADS_PER_BLOCK)
+    ) scheduler_instance (
+        .clk(clk),
+        .reset(reset),
+        .start(start),
+        .fetcher_state(fetcher_state),
+        .core_state(core_state),
+        .decoded_mem_read_enable(decoded_mem_read_enable),
+        .decoded_mem_write_enable(decoded_mem_write_enable),
+        .decoded_ret(decoded_ret),
+        .lsu_state(lsu_state),
+        .current_pc(current_pc),
+        .next_pc(next_pc),
+        .done(done)
+    );
 
-class GpuScoreboard(uvm_subscriber):
-    """
-    Scoreboard implemented as a pyuvm uvm_subscriber.
-    Monitors connect their uvm_analysis_port to self.analysis_export.
-    """
-    def build_phase(self):
-        super().build_phase()
-        self.expected = {}   # addr -> data
-        self.seen     = {}   # addr -> data
-        self.runctl = _RunCtl("runctl", self)
+    // ========= Per-thread units =========
+    genvar i;
+    generate
+        for (i = 0; i < THREADS_PER_BLOCK; i = i + 1) begin : threads
+            // ALU
+            alu alu_instance (
+                .clk(clk),
+                .reset(reset),
+                .enable(i < thread_count),
+                .core_state(core_state),
+                .decoded_alu_arithmetic_mux(decoded_alu_arithmetic_mux),
+                .decoded_alu_output_mux(decoded_alu_output_mux),
+                .rs(rs[i]),
+                .rt(rt[i]),
+                .alu_out(alu_out[i])
+            );
 
-    def set_expected(self, exp_dict):
-        self.expected = dict(exp_dict)
+            // LSU
+            lsu lsu_instance (
+                .clk(clk),
+                .reset(reset),
+                .enable(i < thread_count),
+                .core_state(core_state),
+                .decoded_mem_read_enable(decoded_mem_read_enable),
+                .decoded_mem_write_enable(decoded_mem_write_enable),
+                .mem_read_valid(data_mem_read_valid[i]),
+                .mem_read_address(data_mem_read_address[i]),
+                .mem_read_ready(data_mem_read_ready[i]),
+                .mem_read_data(data_mem_read_data[i]),
+                .mem_write_valid(data_mem_write_valid[i]),
+                .mem_write_address(data_mem_write_address[i]),
+                .mem_write_data(data_mem_write_data[i]),
+                .mem_write_ready(data_mem_write_ready[i]),
+                .rs(rs[i]),
+                .rt(rt[i]),
+                .lsu_state(lsu_state[i]),
+                .lsu_out(lsu_out[i])
+            );
 
-    def write(self, tr):
-        # tr is {"addr": a, "data": d} from DataWriteMonitor
-        a = tr["addr"]
-        d = tr["data"]
-        self.seen[a] = d
+            // Register File
+            registers #(
+                .THREADS_PER_BLOCK(THREADS_PER_BLOCK),
+                .THREAD_ID(i),
+                .DATA_BITS(DATA_MEM_DATA_BITS)
+            ) register_instance (
+                .clk(clk),
+                .reset(reset),
+                .enable(i < thread_count),
+                .block_id(block_id),
+                .core_state(core_state),
+                .decoded_reg_write_enable(decoded_reg_write_enable),
+                .decoded_reg_input_mux(decoded_reg_input_mux),
+                .decoded_rd_address(decoded_rd_address),
+                .decoded_rs_address(decoded_rs_address),
+                .decoded_rt_address(decoded_rt_address),
+                .decoded_immediate(decoded_immediate),
+                .alu_out(alu_out[i]),
+                .lsu_out(lsu_out[i]),
+                .rs(rs[i]),
+                .rt(rt[i])
+            );
 
-    def check_phase(self):
-        # Verify expected writes at end of test
-        for a, d in self.expected.items():
-            got = self.seen.get(a, None)
-            assert got == d, f"Scoreboard mismatch at mem[{a}]: exp 0x{d:02x}, got {got}"
-
-class GpuEnv(uvm_env):
-    def build_phase(self):
-        super().build_phase()
-
-        # Get DUT (fallback to cocotb.top if ConfigDB isn't set for this path)
-        try:
-            dut = ConfigDB().get(self, "", "dut")
-        except Exception:
-            dut = cocotb.top  # safe fallback
-
-        # Discover channel counts
-        num_prog_ch = len(dut.program_mem_read_address)
-        num_data_ch = len(dut.data_mem_read_address)
-
-        # Models + cfg
-        self.cfg        = GpuCfg(num_prog_ch=num_prog_ch, num_data_ch=num_data_ch)
-        self.prog_model = ProgramMemModel()
-        self.data_model = DataMemModel()
-
-        # Publish to children
-        for k, v in [
-            ("dut", dut),
-            ("cfg", self.cfg),
-            ("prog_model", self.prog_model),
-            ("data_model", self.data_model),
-        ]:
-            ConfigDB().set(self, "*", k, v)
-
-        # Components
-        self.pm_drv    = ProgramMemDriver("pm_drv", self)
-        self.dm_drv    = DataMemDriver("dm_drv", self)
-        self.instr_mon = InstrMonitor("instr_mon", self)
-        self.dw_mon    = DataWriteMonitor("dw_mon", self)
-        self.sb        = GpuScoreboard("sb", self)
-
-    def connect_phase(self):
-        # Move connects here so child build_phase has completed
-        self.dw_mon.ap.connect(self.sb.analysis_export)
-        # instr_mon feeds coverage via coverage.sample_cov (optional, handled in monitors)
-
-# tests/uvm_env.py
-class GpuTest(uvm_test):
-    """Base UVM test that builds env; subclasses implement do_run()."""
-    def build_phase(self):
-        super().build_phase()
-        self.env = GpuEnv("env", self)
-
-        # Ensure 'dut' is available in the DB (works whether ConfigDB already has it or not)
-        try:
-            _ = ConfigDB().get(self, "", "dut")
-        except Exception:
-            dut = cocotb.top
-            ConfigDB().set(self, "*", "dut", dut)
-
-        # ---- Start the decoder/LSU tracer (core0/thread0) ----
-        try:
-            from monitors import trace_decoder_and_lsu
-            cocotb.start_soon(trace_decoder_and_lsu(cocotb.top))
-        except Exception as e:
-            # If not under cocotb yet (or tracer not importable), just continue silently
-            pass
-
-
-
-
-====================================================================
->>> File: tests/uvm_items.py
-====================================================================
-
-# tests/uvm_items.py
-from pyuvm import *
-
-class GpuTxn(uvm_sequence_item):
-    def __init__(self, name="GpuTxn"):
-        super().__init__(name)
-        # For program/data memory transactions
-        self.is_read = True
-        self.addr    = 0
-        self.data    = 0
-        self.latency = 0  # cycles to respond
-
-    def randomize(self):
-        # plug in constraints as needed
-        return self
-
-
-====================================================================
->>> File: tests/uvm_models.py
-====================================================================
-
-# tests/uvm_models.py
-from dataclasses import dataclass
-
-@dataclass
-class GpuCfg:
-    num_prog_ch: int
-    num_data_ch: int
-    depth: int = 256
-
-class ProgramMemModel:
-    def __init__(self, image=None, latency=0):
-        self.latency = latency
-        self.image = [0]*256 if image is None else list(image)
-
-    def load_image(self, image):
-        self.image = list(image)
-
-    def fetch(self, addr):
-        data = self.image[addr & 0xFF] & 0xFFFF
-        return data, self.latency
-
-class DataMemModel:
-    def __init__(self, depth=256, read_latency=0, write_latency=0, preload=None):
-        self.depth = depth
-        self.rlat  = read_latency
-        self.wlat  = write_latency
-        self.mem   = [0]*depth
-        if preload is not None:
-            for i, v in enumerate(preload[:depth]):
-                self.mem[i] = v & 0xFF
-
-    def read(self, addr):
-        return (self.mem[addr % self.depth] & 0xFF), self.rlat
-
-    def write(self, addr, data):
-        self.mem[addr % self.depth] = data & 0xFF
-        return self.wlat
+            // Program Counter
+            pc #(
+                .DATA_MEM_DATA_BITS(DATA_MEM_DATA_BITS),
+                .PROGRAM_MEM_ADDR_BITS(PROGRAM_MEM_ADDR_BITS)
+            ) pc_instance (
+                .clk(clk),
+                .reset(reset),
+                .enable(i < thread_count),
+                .core_state(core_state),
+                .decoded_nzp(decoded_nzp),
+                .decoded_immediate(decoded_immediate),
+                .decoded_nzp_write_enable(decoded_nzp_write_enable),
+                .decoded_pc_mux(decoded_pc_mux),
+                .alu_out(alu_out[i]),
+                // IMPORTANT: Only one thread drives current_pc.
+                .current_pc( (i == 0) ? current_pc : current_pc_unused[i] ),
+                .next_pc(next_pc[i])
+            );
+        end
+    endgenerate
+endmodule
 
 
 ====================================================================
->>> File: tests/uvm_sequences.py
+>>> File: dut/src/dcr.sv
 ====================================================================
 
-# tests/uvm_sequences.py
-from pyuvm import ConfigDB
-import cocotb
-from cocotb.triggers import RisingEdge
-from uvm_env import GpuTest
-from program_rom import NOP, BRNZP, CMP, ADD, SUB, MUL, DIV, LDR, STR, CONST, RET, enc
+`default_nettype none
+`timescale 1ns/1ns
 
-CLK = lambda dut: RisingEdge(dut.clk)
+// DEVICE CONTROL REGISTER
+// > Used to configure high-level settings
+// > In this minimal example, the DCR is used to configure the number of threads to run for the kernel
+module dcr (
+    input  logic clk,
+    input  logic reset,
 
-def pad(img, n=256): return img + [enc(NOP)] * (n - len(img))
+    input  logic        device_control_write_enable,
+    input  logic [7:0]  device_control_data,
+    output logic [7:0]  thread_count
+);
+    // Store device control data in dedicated register
+    logic [7:0] device_control_register;
 
-async def write_dcr_and_start(dut, threads=4):
-    for _ in range(5):
-        await CLK(dut)   # align with tb_top_stub reset behavior
-    dut.reset.value = 0
-    dut.device_control_write_enable.value = 1
-    dut.device_control_data.value = threads & 0xFF
-    await CLK(dut)
-    dut.device_control_write_enable.value = 0
-    dut.start.value = 1
-    await CLK(dut)
-    dut.start.value = 0
+    assign thread_count = device_control_register;
 
-# Small helpers to build programs
-def prog_const(rd, imm): return [enc(CONST, rd=rd, imm8=imm)]
-def prog_store(addr_reg, data_reg): return [enc(STR, rs=addr_reg, rt=data_reg)]
-def prog_load(rd, addr_reg): return [enc(LDR, rd=rd, rs=addr_reg)]
-def prog_alu(rd, rs, rt, op): return [enc(op, rd=rd, rs=rs, rt=rt)]
-def prog_cmp(rs, rt): return [enc(CMP, rs=rs, rt=rt)]
-def prog_br(mask, imm): return [enc(BRNZP, rd=(mask & 0x7), imm8=imm)]
-
-class BaseGpuTest(GpuTest):
-    async def run_phase(self):
-        self.raise_objection()
-        try:
-            await self.do_run()
-        finally:
-            self.drop_objection()
-
-    async def run_once(self, program_image, threads=4, preload=None, exp=None):
-        try:
-            dut = ConfigDB().get(self, "", "dut")
-        except Exception:
-            dut = cocotb.top
-            ConfigDB().set(self, "*", "dut", dut)
-
-        env        = self.env
-        prog_model = env.prog_model
-        data_model = env.data_model
-
-        # Load program
-        prog_model.load_image(pad(program_image))
-
-        # Optional preload
-        if preload is not None:
-            env.data_model = type(data_model)(
-                depth=data_model.depth,
-                read_latency=data_model.rlat,
-                write_latency=data_model.wlat,
-                preload=preload
-            )
-            ConfigDB().set(self.env, "*", "data_model", env.data_model)
-
-        # Scoreboard expectations
-        if exp is not None:
-            env.sb.set_expected(exp)
-
-        # Kick off kernel
-        dut._log.info("[UVM] run_once(): writing DCR and pulsing start")
-        await write_dcr_and_start(dut, threads=threads)
-
-        # Locate 'done'
-        done_sig = getattr(dut, "done", None)
-        if done_sig is None:
-            root_gpu = getattr(dut, "dut", None)
-            if root_gpu is None:
-                raise RuntimeError("Couldn't find GPU 'done' at dut.done or dut.dut.done")
-            done_sig = root_gpu.done
-
-        # ---- Bounded wait with progress breadcrumbs ----
-        max_cycles = 20000  # ~200 us at 100 MHz
-        saw_prog_read = False
-        for cyc in range(max_cycles):
-            # simple progress probe (top-level bus lives on tb_top_stub)
-            if int(dut.program_mem_read_valid.value) and int(dut.program_mem_read_ready.value):
-                saw_prog_read = True
-
-            if int(done_sig.value) == 1:
-                break
-
-            # periodic breadcrumb every 1000 cycles
-            if (cyc % 1000) == 0 and cyc != 0:
-                dut._log.info(f"[UVM] waiting... cyc={cyc}, pmem rv={int(dut.program_mem_read_valid.value)}, rr={int(dut.program_mem_read_ready.value)}")
-
-            await CLK(dut)
-        else:
-            # Timed out — dump a few key signals to help debug
-            rv = int(dut.program_mem_read_valid.value)
-            rr = int(dut.program_mem_read_ready.value)
-            dut._log.error(f"[UVM] TIMEOUT: done never asserted (max_cycles={max_cycles}) "
-                           f"(pmem rv={rv}, rr={rr}, saw_prog_read={saw_prog_read})")
-            raise AssertionError("Timeout waiting for GPU 'done'")
-
-        # (optional) dump coverage here
-        # from coverage import report_cov; report_cov()
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            device_control_register <= 8'b0;
+        end else if (device_control_write_enable) begin
+            device_control_register <= device_control_data;
+        end
+    end
+endmodule
 
 
+====================================================================
+>>> File: dut/src/decoder.sv
+====================================================================
 
-class TestALU(BaseGpuTest):
-    async def do_run(self):
-        p = []
-        p += prog_const(1, 5)
-        p += prog_const(2, 7)
-        p += prog_alu(3, 1, 2, ADD)
-        p += prog_alu(4, 1, 2, SUB)
-        p += prog_alu(5, 1, 2, MUL)
-        p += prog_alu(6, 2, 1, DIV)
-        # store R3..R6 to mem[0..3]
-        p += prog_store(0, 3)
-        p += prog_const(0, 1); p += prog_store(0, 4)
-        p += prog_const(0, 2); p += prog_store(0, 5)
-        p += prog_const(0, 3); p += prog_store(0, 6)
-        p += [enc(RET)]
-        exp = {0:12, 1:((-2) & 0xFF), 2:35, 3:1}
-        await self.run_once(p, threads=4, exp=exp)
+`default_nettype none
+`timescale 1ns/1ns
 
-class TestLSU(BaseGpuTest):
-    async def do_run(self):
-        preload = [0]*256
-        preload[10] = 42
-        p = []
-        p += prog_const(0,10)
-        p += prog_load(4,0)
-        p += prog_const(0,1)
-        p += prog_store(0,4)
-        p += [enc(RET)]
-        exp = {1:42}
-        await self.run_once(p, threads=4, preload=preload, exp=exp)
+// INSTRUCTION DECODER
+// > Decodes an instruction into the control signals necessary to execute it
+// > Each core has it's own decoder
+module decoder (
+    input  logic        clk,
+    input  logic        reset,
 
-class TestBranchTaken(BaseGpuTest):
-    async def do_run(self):
-        p = []
-        p += prog_const(1,7); p += prog_const(2,3)
-        p += prog_cmp(1,2)               # sets P
-        p += prog_br(0b100, 12)          # branch to 12 if P
-        # fallthrough path
-        p += prog_const(0,2); p += prog_const(3,0xBB); p += prog_store(0,3); p += [enc(RET)]
-        while len(p) < 12: p.append(enc(NOP))
-        # taken label
-        p += prog_const(0,2); p += prog_const(3,0xAA); p += prog_store(0,3); p += [enc(RET)]
-        exp = {2:0xAA}
-        await self.run_once(p, threads=4, exp=exp)
+    input  logic [2:0]  core_state,
+    input  logic [15:0] instruction,
+    
+    // Instruction Signals
+    output logic [3:0]  decoded_rd_address,
+    output logic [3:0]  decoded_rs_address,
+    output logic [3:0]  decoded_rt_address,
+    output logic [2:0]  decoded_nzp,
+    output logic [7:0]  decoded_immediate,
+    
+    // Control Signals
+    output logic        decoded_reg_write_enable,         // Enable writing to a register
+    output logic        decoded_mem_read_enable,          // Enable reading from memory
+    output logic        decoded_mem_write_enable,         // Enable writing to memory
+    output logic        decoded_nzp_write_enable,         // Enable writing to NZP register
+    output logic [1:0]  decoded_reg_input_mux,            // Select input to register
+    output logic [1:0]  decoded_alu_arithmetic_mux,       // Select arithmetic operation
+    output logic        decoded_alu_output_mux,           // Select operation in ALU
+    output logic        decoded_pc_mux,                   // Select source of next PC
 
-class TestBranchNotTaken(BaseGpuTest):
-    async def do_run(self):
-        p = []
-        p += prog_const(1,2); p += prog_const(2,9)
-        p += prog_cmp(1,2)               # sets N
-        p += prog_br(0b100, 12)          # mask=P only -> not taken
-        p += prog_const(0,2); p += prog_const(3,0xBB); p += prog_store(0,3); p += [enc(RET)]
-        while len(p) < 12: p.append(enc(NOP))
-        p += prog_const(0,2); p += prog_const(3,0xAA); p += prog_store(0,3); p += [enc(RET)]
-        exp = {2:0xBB}
-        await self.run_once(p, threads=4, exp=exp)
+    // Return (finished executing thread)
+    output logic        decoded_ret
+);
+    localparam logic [3:0] NOP   = 4'b0000,
+                           BRnzp = 4'b0001,
+                           CMP   = 4'b0010,
+                           ADD   = 4'b0011,
+                           SUB   = 4'b0100,
+                           MUL   = 4'b0101,
+                           DIV   = 4'b0110,
+                           LDR   = 4'b0111,
+                           STR   = 4'b1000,
+                           CONST = 4'b1001,
+                           RET   = 4'b1111;
 
-class TestTailThreads(BaseGpuTest):
-    async def do_run(self):
-        # 6 threads → tail block of 2 (THREADS_PER_BLOCK=4)
-        p = []
-        p += prog_const(0,0)
-        p += [enc(STR, rs=0, rt=15)]             # mem[R0] = %threadIdx
-        p += prog_const(3,1); p += prog_alu(0,0,3,ADD)
-        p += [enc(STR, rs=0, rt=15)]
-        p += [enc(RET)]
-        await self.run_once(p, threads=6)
+    always_ff @(posedge clk) begin 
+        if (reset) begin 
+            decoded_rd_address        <= '0;
+            decoded_rs_address        <= '0;
+            decoded_rt_address        <= '0;
+            decoded_immediate         <= '0;
+            decoded_nzp               <= '0;
+            decoded_reg_write_enable  <= 1'b0;
+            decoded_mem_read_enable   <= 1'b0;
+            decoded_mem_write_enable  <= 1'b0;
+            decoded_nzp_write_enable  <= 1'b0;
+            decoded_reg_input_mux     <= 2'b00;
+            decoded_alu_arithmetic_mux<= 2'b00;
+            decoded_alu_output_mux    <= 1'b0;
+            decoded_pc_mux            <= 1'b0;
+            decoded_ret               <= 1'b0;
+        end else begin 
+            // Decode when core_state = DECODE
+            if (core_state == 3'b010) begin 
+                // Get instruction signals from instruction every time
+                decoded_rd_address <= instruction[11:8];
+                decoded_rs_address <= instruction[7:4];
+                decoded_rt_address <= instruction[3:0];
+                decoded_immediate  <= instruction[7:0];
+                decoded_nzp        <= instruction[11:9];
 
-class TestControllerLatency(BaseGpuTest):
-    async def do_run(self):
-        # Adjust latencies
-        env = self.env
-        env.data_model.wlat = 2
-        env.data_model.rlat = 1
+                // Control signals reset on every decode and set conditionally by instruction
+                decoded_reg_write_enable   <= 1'b0;
+                decoded_mem_read_enable    <= 1'b0;
+                decoded_mem_write_enable   <= 1'b0;
+                decoded_nzp_write_enable   <= 1'b0;
+                decoded_reg_input_mux      <= 2'b00;
+                decoded_alu_arithmetic_mux <= 2'b00;
+                decoded_alu_output_mux     <= 1'b0;
+                decoded_pc_mux             <= 1'b0;
+                decoded_ret                <= 1'b0;
 
-        p = []
-        p += prog_const(0,0); p += prog_const(1,0x11)
-        for _ in range(4):
-            p += prog_store(0,1)
-            p += prog_const(3,1); p += prog_alu(0,0,3,ADD)
-        p += [enc(RET)]
-        exp = {0:0x11,1:0x11,2:0x11,3:0x11}
-        await self.run_once(p, threads=4, exp=exp)
+                // Set the control signals for each instruction
+                case (instruction[15:12])
+                    NOP: ; // no-op
+                    BRnzp: begin 
+                        decoded_pc_mux <= 1'b1;
+                    end
+                    CMP: begin 
+                        decoded_alu_output_mux   <= 1'b1;
+                        decoded_nzp_write_enable <= 1'b1;
+                    end
+                    ADD: begin 
+                        decoded_reg_write_enable   <= 1'b1;
+                        decoded_reg_input_mux      <= 2'b00;
+                        decoded_alu_arithmetic_mux <= 2'b00;
+                    end
+                    SUB: begin 
+                        decoded_reg_write_enable   <= 1'b1;
+                        decoded_reg_input_mux      <= 2'b00;
+                        decoded_alu_arithmetic_mux <= 2'b01;
+                    end
+                    MUL: begin 
+                        decoded_reg_write_enable   <= 1'b1;
+                        decoded_reg_input_mux      <= 2'b00;
+                        decoded_alu_arithmetic_mux <= 2'b10;
+                    end
+                    DIV: begin 
+                        decoded_reg_write_enable   <= 1'b1;
+                        decoded_reg_input_mux      <= 2'b00;
+                        decoded_alu_arithmetic_mux <= 2'b11;
+                    end
+                    LDR: begin 
+                        decoded_reg_write_enable <= 1'b1;
+                        decoded_reg_input_mux    <= 2'b01;
+                        decoded_mem_read_enable  <= 1'b1;
+                    end
+                    STR: begin 
+                        decoded_mem_write_enable <= 1'b1;
+                    end
+                    CONST: begin 
+                        decoded_reg_write_enable <= 1'b1;
+                        decoded_reg_input_mux    <= 2'b10;
+                    end
+                    RET: begin 
+                        decoded_ret <= 1'b1;
+                    end
+                endcase
+            end
+        end
+    end
+endmodule
 
-class TestPrefetch(BaseGpuTest):
-    async def do_run(self):
-        """
-        Verify instruction prefetch: with ROM latency, later FETCHes
-        should be satisfied from the prefetch buffer (no bus read that cycle).
-        """
-        # Small sequential program: CONST -> NOP -> NOP -> RET
-        p = [enc(CONST, rd=1, imm8=5), enc(NOP), enc(NOP), enc(RET)]
-        p += [enc(NOP)] * (256 - len(p))  # pad
 
-        # Get DUT and environment
-        try:
-            dut = ConfigDB().get(self, "", "dut")
-        except Exception:
-            dut = cocotb.top
-            ConfigDB().set(self, "*", "dut", dut)
+====================================================================
+>>> File: dut/src/dispatch.sv
+====================================================================
 
-        dut._log.info(">>> TestPrefetch starting; forcing ROM latency")
+`default_nettype none
+`timescale 1ns/1ns
 
-        # Slow down program ROM so prefetch can hide latency
-        self.env.prog_model.latency = 2
-        self.env.prog_model.load_image(p)
+// ============================================================
+//  DISPATCH UNIT (latch-free, width-safe, debug-friendly)
+// ============================================================
 
-        # Boot
-        await write_dcr_and_start(dut, threads=4)
+module dispatch #(
+    parameter int NUM_CORES          = 2,
+    parameter int THREADS_PER_BLOCK  = 4
+) (
+    input  logic clk,
+    input  logic reset,
+    input  logic start,
 
-        # The GPU instance inside tb_top_stub is named 'dut'
-        gpu   = getattr(dut, "dut", dut)
-        core  = gpu.cores[0].core_instance
-        fetch = core.fetcher_instance
+    // Kernel Metadata
+    input  logic [7:0] thread_count,
 
-        # 1) First demand fetch must assert bus (top-level bus lives on tb_top_stub)
-        while True:
-            await CLK(dut)
-            if int(dut.program_mem_read_valid.value) == 1:
-                break
+    // Core States
+    input  logic [NUM_CORES-1:0]                          core_done,
+    output logic [NUM_CORES-1:0]                          core_start,
+    output logic [NUM_CORES-1:0]                          core_reset,
+    output logic [7:0]                                    core_block_id     [NUM_CORES],
+    output logic [$clog2(THREADS_PER_BLOCK):0]            core_thread_count [NUM_CORES],
 
-        # 2) Look for a FETCH cycle where we do NOT assert bus, yet next cycle we are FETCHED
-        saw_prefetch_hit = False
-        for _ in range(400):
-            await CLK(dut)
-            in_fetch = (int(core.core_state.value) == 0b001)
-            if in_fetch:
-                bus_req = int(dut.program_mem_read_valid.value)   # top-level
-                await CLK(dut)
-                became_fetched = (int(fetch.fetcher_state.value) == 0b010)
-                if became_fetched and (bus_req == 0):
-                    saw_prefetch_hit = True
-                    break
+    // Kernel Execution
+    output logic done
+);
 
-        assert saw_prefetch_hit, "Expected a prefetch hit (FETCHED without asserting program_mem_read_valid)."
+    // --------------------------------------------------------
+    // State registers
+    // --------------------------------------------------------
+    logic [7:0] total_blocks;
 
-        # Let kernel finish
-        done_sig = getattr(dut, "done", None)
-        if done_sig is None:
-            root_gpu = getattr(dut, "dut", None)
-            if root_gpu is None:
-                raise RuntimeError("Couldn't find GPU 'done' at dut.done or dut.dut.done")
-            done_sig = root_gpu.done
+    logic [7:0] blocks_dispatched, blocks_done;
+    logic [7:0] bd_next, bn_next;
 
-        while int(done_sig.value) == 0:
-            await CLK(dut)
+    logic [NUM_CORES-1:0] core_busy, core_busy_next;
+    logic [NUM_CORES-1:0] core_start_r, core_start_next;
+    logic [NUM_CORES-1:0] core_reset_r, core_reset_next;
+
+    // Register the per-core metadata to avoid latches
+    logic [7:0]                                   core_block_id_r     [NUM_CORES];
+    logic [$clog2(THREADS_PER_BLOCK):0]           core_thread_count_r [NUM_CORES];
+    logic [7:0]                                   core_block_id_next     [NUM_CORES];
+    logic [$clog2(THREADS_PER_BLOCK):0]           core_thread_count_next [NUM_CORES];
+
+    logic done_r, done_next;
+    logic start_execution;
+
+    // Drive outputs from registered state
+    assign core_start        = core_start_r;
+    assign core_reset        = core_reset_r;
+    assign core_block_id     = core_block_id_r;
+    assign core_thread_count = core_thread_count_r;
+    assign done              = done_r;
+
+    // --------------------------------------------------------
+    // 8-bit safe computation of total blocks
+    // --------------------------------------------------------
+    assign total_blocks = (thread_count + 8'(THREADS_PER_BLOCK) - 8'd1) / 8'(THREADS_PER_BLOCK);
+
+    // --------------------------------------------------------
+    // Combinational next-state logic
+    // --------------------------------------------------------
+    always_comb begin
+        // Defaults: hold current registered values
+        bd_next              = blocks_dispatched;
+        bn_next              = blocks_done;
+
+        core_start_next      = '0;                 // one-cycle pulse
+        core_reset_next      = core_reset_r;       // usually held then toggled
+        core_busy_next       = core_busy;
+        done_next            = done_r;
+
+        // Default next = current for registered arrays (prevents latches)
+        for (int i = 0; i < NUM_CORES; i++) begin
+            core_block_id_next[i]     = core_block_id_r[i];
+            core_thread_count_next[i] = core_thread_count_r[i];
+        end
+
+        // Dispatch new work on cores released from reset
+        for (int i = 0; i < NUM_CORES; i++) begin
+            if (core_reset_r[i]) begin
+                core_reset_next[i] = 1'b0;
+
+                if (bd_next < total_blocks) begin
+                    core_start_next[i]      = 1'b1;
+                    core_busy_next[i]       = 1'b1;
+
+                    // Assign metadata
+                    core_block_id_next[i]   = bd_next;
+                    core_thread_count_next[i] = $bits(core_thread_count_next[i])'(
+                        (bd_next == total_blocks - 8'd1)
+                            ? (thread_count - (bd_next * 8'(THREADS_PER_BLOCK)))
+                            : 8'(THREADS_PER_BLOCK)
+                    );
+
+`ifdef DEBUG_LOG
+                    $display("[%0t][DISPATCH] core=%0d START block_id=%0d threads=%0d total_blocks=%0d",
+                             $time, i, bd_next,
+                             (bd_next == total_blocks - 8'd1)
+                               ? (thread_count - (bd_next * 8'(THREADS_PER_BLOCK)))
+                               : 8'(THREADS_PER_BLOCK),
+                             total_blocks);
+`endif
+                    bd_next = bd_next + 8'd1;
+                end
+            end
+        end
+
+        // Handle completions
+        for (int i = 0; i < NUM_CORES; i++) begin
+            if (core_busy[i] && core_done[i]) begin
+                core_reset_next[i] = 1'b1;
+                core_start_next[i] = 1'b0;
+                core_busy_next[i]  = 1'b0;
+                bn_next            = bn_next + 8'd1;
+
+`ifdef DEBUG_LOG
+                $display("[%0t][DISPATCH] core=%0d DONE blocks_done=%0d/%0d",
+                         $time, i, bn_next, total_blocks);
+`endif
+            end
+        end
+
+        // Mark kernel completion
+        if (bn_next == total_blocks)
+            done_next = 1'b1;
+    end
+
+    // --------------------------------------------------------
+    // Sequential state update
+    // --------------------------------------------------------
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            blocks_dispatched <= '0;
+            blocks_done       <= '0;
+
+            core_busy         <= '0;
+            core_start_r      <= '0;
+            core_reset_r      <= {NUM_CORES{1'b1}}; // hold cores in reset at power-up
+
+            done_r            <= 1'b0;
+            start_execution   <= 1'b0;
+
+            foreach (core_block_id_r[i])     core_block_id_r[i]     <= '0;
+            foreach (core_thread_count_r[i]) core_thread_count_r[i] <= THREADS_PER_BLOCK[$bits(core_thread_count_r[i])-1:0];
+
+        end else if (start) begin
+            // pseudo-posedge(start) to initialize a run
+            if (!start_execution)
+                start_execution <= 1'b1;
+
+            // Register transitions
+            blocks_dispatched <= bd_next;
+            blocks_done       <= bn_next;
+
+            core_busy         <= core_busy_next;
+            core_start_r      <= core_start_next;
+            core_reset_r      <= core_reset_next;
+
+            done_r            <= done_next;
+
+            for (int i = 0; i < NUM_CORES; i++) begin
+                core_block_id_r[i]     <= core_block_id_next[i];
+                core_thread_count_r[i] <= core_thread_count_next[i];
+            end
+        end
+    end
+
+endmodule
+
+
+====================================================================
+>>> File: dut/src/fetcher.sv
+====================================================================
+
+`default_nettype none
+`timescale 1ns/1ns
+
+// INSTRUCTION FETCHER
+// > Retrieves the instruction at the current PC from global data memory
+// > Each core has it's own fetcher
+module fetcher #(
+    parameter int PROGRAM_MEM_ADDR_BITS = 8,
+    parameter int PROGRAM_MEM_DATA_BITS = 16
+) (
+    input  logic clk,
+    input  logic reset,
+
+    input logic [PROGRAM_MEM_ADDR_BITS-1:0] spec_pc,
+    input logic spec_en, //should be asserted during Decode
+    
+    // Execution State
+    input  logic [2:0]                      core_state,
+    input  logic [7:0]                      current_pc,
+
+    // Program Memory
+    output logic                            mem_read_valid,
+    output logic [PROGRAM_MEM_ADDR_BITS-1:0] mem_read_address,
+    input  logic                            mem_read_ready,
+    input  logic [PROGRAM_MEM_DATA_BITS-1:0] mem_read_data,
+
+    // Fetcher Output
+    output logic [2:0]                      fetcher_state,
+    output logic [PROGRAM_MEM_DATA_BITS-1:0] instruction
+);
+    localparam logic [2:0] IDLE = 3'b000, FETCHING = 3'b001, FETCHED = 3'b010;
+
+    logic                                   p_valid;
+    logic [PROGRAM_MEM_ADDR_BITS-1:0]       p_pc;
+    logic [PROGRAM_MEM_DATA_BITS-1:0]       p_instr;
+
+    // define a 1-bit enumeration txn_t with DEM = demand Fetch and PF = Prefetch
+    typedef enum logic [0:0] {DEM, PF} txn_t;
+    txn_t txn_kind;
+
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            fetcher_state    <= IDLE;
+            mem_read_valid   <= 1'b0;
+            mem_read_address <= '0;
+            instruction      <= '0;
+
+            p_valid          <= 1'b0;
+            p_pc             <= '0;
+            p_instr          <= '0;
+            txn_kind         <= DEM;
+
+        end else begin
+            // -------------------------
+            // Prefetcher (runs anytime)
+            // -------------------------
+            // Fire a prefetch when asked, if buffer empty and no demand fetch in progress.
+            if (spec_en && !p_valid && (fetcher_state != FETCHING) && !mem_read_valid) begin
+                mem_read_valid   <= 1'b1;
+                mem_read_address <= spec_pc;
+                txn_kind         <= PF;
+            end
+
+            // Complete any outstanding memory read
+            if (mem_read_valid && mem_read_ready) begin
+                mem_read_valid <= 1'b0;
+                if (txn_kind == PF) begin
+                    p_valid <= 1'b1;
+                    p_pc    <= mem_read_address;
+                    p_instr <= mem_read_data;
+                end else begin
+                    // demand fetch completion
+                    instruction   <= mem_read_data;
+                    fetcher_state <= FETCHED;
+                end
+            end
+
+            // -------------------------
+            // Demand fetch state machine
+            // -------------------------
+            unique case (fetcher_state)
+                IDLE: begin
+                    if (core_state == 3'b001 /* FETCH */) begin
+                        // If we already have the right line prefetched, consume it immediately.
+                        if (p_valid && (p_pc == current_pc)) begin
+                            instruction   <= p_instr;
+                            p_valid       <= 1'b0; // consume buffer
+                            fetcher_state <= FETCHED;
+                        end else begin
+                            // Issue demand fetch
+                            mem_read_valid   <= 1'b1;
+                            mem_read_address <= current_pc;
+                            txn_kind         <= DEM;
+                            fetcher_state    <= FETCHING;
+                        end
+                    end
+                end
+
+                FETCHING: begin
+                    // wait for mem_read_ready → handled above
+                end
+
+                FETCHED: begin
+                    if (core_state == 3'b010 /* DECODE */) begin
+                        fetcher_state <= IDLE;
+                    end
+                end
+            endcase
+        end
+    end
+endmodule
+
+
+====================================================================
+>>> File: dut/src/gpu.sv
+====================================================================
+
+`default_nettype none
+`timescale 1ns/1ns
+
+// GPU
+// > Built to use an external async memory with multi-channel read/write
+// > Assumes that the program is loaded into program memory, data into data memory, and threads into
+//   the device control register before the start signal is triggered
+// > Has memory controllers to interface between external memory and its multiple cores
+// > Configurable number of cores and thread capacity per core
+module gpu #(
+    parameter int DATA_MEM_ADDR_BITS       = 8,   // Number of bits in data memory address (256 rows)
+    parameter int DATA_MEM_DATA_BITS       = 8,   // Number of bits in data memory value (8 bit data)
+    parameter int DATA_MEM_NUM_CHANNELS    = 4,   // Number of concurrent channels for sending requests to data memory
+    parameter int PROGRAM_MEM_ADDR_BITS    = 8,   // Number of bits in program memory address (256 rows)
+    parameter int PROGRAM_MEM_DATA_BITS    = 16,  // Number of bits in program memory value (16 bit instruction)
+    parameter int PROGRAM_MEM_NUM_CHANNELS = 1,   // Number of concurrent channels for sending requests to program memory
+    parameter int NUM_CORES                = 2,   // Number of cores to include in this GPU
+    parameter int THREADS_PER_BLOCK        = 4    // Number of threads to handle per block (per core)
+) (
+    input  logic clk,
+    input  logic reset,
+
+    // Kernel Execution
+    input  logic start,
+    output logic done,
+
+    // Device Control Register
+    input  logic       device_control_write_enable,
+    input  logic [7:0] device_control_data,
+
+    // Program Memory
+    output logic [PROGRAM_MEM_NUM_CHANNELS-1:0]              program_mem_read_valid,
+    output logic [PROGRAM_MEM_ADDR_BITS-1:0]                 program_mem_read_address [PROGRAM_MEM_NUM_CHANNELS],
+    input  logic [PROGRAM_MEM_NUM_CHANNELS-1:0]              program_mem_read_ready,
+    input  logic [PROGRAM_MEM_DATA_BITS-1:0]                 program_mem_read_data   [PROGRAM_MEM_NUM_CHANNELS],
+
+    // Data Memory
+    output logic [DATA_MEM_NUM_CHANNELS-1:0]                 data_mem_read_valid,
+    output logic [DATA_MEM_ADDR_BITS-1:0]                    data_mem_read_address  [DATA_MEM_NUM_CHANNELS],
+    input  logic [DATA_MEM_NUM_CHANNELS-1:0]                 data_mem_read_ready,
+    input  logic [DATA_MEM_DATA_BITS-1:0]                    data_mem_read_data     [DATA_MEM_NUM_CHANNELS],
+    output logic [DATA_MEM_NUM_CHANNELS-1:0]                 data_mem_write_valid,
+    output logic [DATA_MEM_ADDR_BITS-1:0]                    data_mem_write_address [DATA_MEM_NUM_CHANNELS],
+    output logic [DATA_MEM_DATA_BITS-1:0]                    data_mem_write_data    [DATA_MEM_NUM_CHANNELS],
+    input  logic [DATA_MEM_NUM_CHANNELS-1:0]                 data_mem_write_ready
+);
+    // Control
+    logic [7:0] thread_count;
+
+    // Compute Core State
+    logic [NUM_CORES-1:0]                           core_start;
+    logic [NUM_CORES-1:0]                           core_reset;
+    logic [NUM_CORES-1:0]                           core_done;
+    logic [7:0]                                      core_block_id     [NUM_CORES];
+    logic [$clog2(THREADS_PER_BLOCK):0]              core_thread_count [NUM_CORES];
+
+    // LSU <> Data Memory Controller Channels
+    localparam int NUM_LSUS = NUM_CORES * THREADS_PER_BLOCK;
+    logic [NUM_LSUS-1:0]                             lsu_read_valid;
+    logic [DATA_MEM_ADDR_BITS-1:0]                   lsu_read_address  [NUM_LSUS];
+    logic [NUM_LSUS-1:0]                             lsu_read_ready;
+    logic [DATA_MEM_DATA_BITS-1:0]                   lsu_read_data     [NUM_LSUS];
+    logic [NUM_LSUS-1:0]                             lsu_write_valid;
+    logic [DATA_MEM_ADDR_BITS-1:0]                   lsu_write_address [NUM_LSUS];
+    logic [DATA_MEM_DATA_BITS-1:0]                   lsu_write_data    [NUM_LSUS];
+    logic [NUM_LSUS-1:0]                             lsu_write_ready;
+
+    // Fetcher <> Program Memory Controller Channels
+    localparam int NUM_FETCHERS = NUM_CORES;
+    logic [NUM_FETCHERS-1:0]                          fetcher_read_valid;
+    logic [PROGRAM_MEM_ADDR_BITS-1:0]                 fetcher_read_address [NUM_FETCHERS];
+    logic [NUM_FETCHERS-1:0]                          fetcher_read_ready;
+    logic [PROGRAM_MEM_DATA_BITS-1:0]                 fetcher_read_data   [NUM_FETCHERS];
+    
+    // Device Control Register
+    dcr dcr_instance (
+        .clk(clk),
+        .reset(reset),
+
+        .device_control_write_enable(device_control_write_enable),
+        .device_control_data(device_control_data),
+        .thread_count(thread_count)
+    );
+
+    // Data Memory Controller
+    controller #(
+        .ADDR_BITS(DATA_MEM_ADDR_BITS),
+        .DATA_BITS(DATA_MEM_DATA_BITS),
+        .NUM_CONSUMERS(NUM_LSUS),
+        .NUM_CHANNELS(DATA_MEM_NUM_CHANNELS)
+    ) data_memory_controller (
+        .clk(clk),
+        .reset(reset),
+
+        .consumer_read_valid (lsu_read_valid),
+        .consumer_read_address(lsu_read_address),
+        .consumer_read_ready (lsu_read_ready),
+        .consumer_read_data  (lsu_read_data),
+        .consumer_write_valid(lsu_write_valid),
+        .consumer_write_address(lsu_write_address),
+        .consumer_write_data (lsu_write_data),
+        .consumer_write_ready(lsu_write_ready),
+
+        .mem_read_valid (data_mem_read_valid),
+        .mem_read_address(data_mem_read_address),
+        .mem_read_ready (data_mem_read_ready),
+        .mem_read_data  (data_mem_read_data),
+        .mem_write_valid (data_mem_write_valid),
+        .mem_write_address(data_mem_write_address),
+        .mem_write_data  (data_mem_write_data),
+        .mem_write_ready (data_mem_write_ready)
+    );
+
+    // Program Memory Controller (read-only; tie off write path)
+    // Dummy signals to satisfy controller ports without changing behavior.
+    logic [PROGRAM_MEM_NUM_CHANNELS-1:0]              pmc_mem_write_valid_dummy;
+    logic [PROGRAM_MEM_ADDR_BITS-1:0]                 pmc_mem_write_address_dummy [PROGRAM_MEM_NUM_CHANNELS];
+    logic [PROGRAM_MEM_DATA_BITS-1:0]                 pmc_mem_write_data_dummy    [PROGRAM_MEM_NUM_CHANNELS];
+    // If your external program memory exposes a write_ready, drive it as 0 (never ready) or 1 as you prefer.
+    // It is unused because WRITE_ENABLE=0, but the controller still has the port.
+    logic [PROGRAM_MEM_NUM_CHANNELS-1:0]              pmc_mem_write_ready_dummy;
+    assign pmc_mem_write_ready_dummy = '0;
+
+        controller #(
+        .ADDR_BITS(PROGRAM_MEM_ADDR_BITS),
+        .DATA_BITS(PROGRAM_MEM_DATA_BITS),
+        .NUM_CONSUMERS(NUM_FETCHERS),
+        .NUM_CHANNELS(PROGRAM_MEM_NUM_CHANNELS),
+        .WRITE_ENABLE(0)
+    ) program_memory_controller (
+        .clk   (clk),
+        .reset (reset),
+
+        // READ consumers (fetchers)
+        .consumer_read_valid  (fetcher_read_valid),
+        .consumer_read_address(fetcher_read_address),
+        .consumer_read_ready  (fetcher_read_ready),
+        .consumer_read_data   (fetcher_read_data),
+
+        // Memory (program) read path
+        .mem_read_valid (program_mem_read_valid),
+        .mem_read_address(program_mem_read_address),
+        .mem_read_ready (program_mem_read_ready),
+        .mem_read_data  (program_mem_read_data),
+
+        // ---- TIE OFF unused WRITE consumer side (important!) ----
+        .consumer_write_valid   ('0),
+        .consumer_write_address ('{default:'0}),
+        .consumer_write_data    ('{default:'0}),
+        .consumer_write_ready   (),   // ignore
+
+        // ---- Dummy write path (already unused) ----
+        .mem_write_valid (pmc_mem_write_valid_dummy),
+        .mem_write_address(pmc_mem_write_address_dummy),
+        .mem_write_data  (pmc_mem_write_data_dummy),
+        .mem_write_ready (pmc_mem_write_ready_dummy)
+    );
+
+
+    // Dispatcher
+    dispatch #(
+        .NUM_CORES(NUM_CORES),
+        .THREADS_PER_BLOCK(THREADS_PER_BLOCK)
+    ) dispatch_instance (
+        .clk(clk),
+        .reset(reset),
+        .start(start),
+        .thread_count(thread_count),
+        .core_done(core_done),
+        .core_start(core_start),
+        .core_reset(core_reset),
+        .core_block_id(core_block_id),
+        .core_thread_count(core_thread_count),
+        .done(done)
+    );
+
+    // Compute Cores
+    genvar i;
+    generate
+        for (i = 0; i < NUM_CORES; i = i + 1) begin : cores
+            // EDA: separate per-core LSU <-> controller signals to avoid slicing limits
+            logic [THREADS_PER_BLOCK-1:0]              core_lsu_read_valid;
+            logic [DATA_MEM_ADDR_BITS-1:0]             core_lsu_read_address  [THREADS_PER_BLOCK];
+            logic [THREADS_PER_BLOCK-1:0]              core_lsu_read_ready;
+            logic [DATA_MEM_DATA_BITS-1:0]             core_lsu_read_data     [THREADS_PER_BLOCK];
+            logic [THREADS_PER_BLOCK-1:0]              core_lsu_write_valid;
+            logic [DATA_MEM_ADDR_BITS-1:0]             core_lsu_write_address [THREADS_PER_BLOCK];
+            logic [DATA_MEM_DATA_BITS-1:0]             core_lsu_write_data    [THREADS_PER_BLOCK];
+            logic [THREADS_PER_BLOCK-1:0]              core_lsu_write_ready;
+
+            // Pass through signals between LSUs and data memory controller
+            genvar j;
+            for (j = 0; j < THREADS_PER_BLOCK; j = j + 1) begin : lsu_xbar
+                localparam int lsu_index = i * THREADS_PER_BLOCK + j;
+                always_comb begin
+                    // core → global
+                    lsu_read_valid   [lsu_index] = core_lsu_read_valid[j];
+                    lsu_read_address [lsu_index] = core_lsu_read_address[j];
+                    lsu_write_valid  [lsu_index] = core_lsu_write_valid[j];
+                    lsu_write_address[lsu_index] = core_lsu_write_address[j];
+                    lsu_write_data   [lsu_index] = core_lsu_write_data[j];
+
+                    // global → core
+                    core_lsu_read_ready [j] = lsu_read_ready [lsu_index];
+                    core_lsu_read_data  [j] = lsu_read_data  [lsu_index];
+                    core_lsu_write_ready[j] = lsu_write_ready[lsu_index];
+                    end
+            end
+
+            // Compute Core
+            core #(
+                .DATA_MEM_ADDR_BITS    (DATA_MEM_ADDR_BITS),
+                .DATA_MEM_DATA_BITS    (DATA_MEM_DATA_BITS),
+                .PROGRAM_MEM_ADDR_BITS (PROGRAM_MEM_ADDR_BITS),
+                .PROGRAM_MEM_DATA_BITS (PROGRAM_MEM_DATA_BITS),
+                .THREADS_PER_BLOCK     (THREADS_PER_BLOCK)
+            ) core_instance (
+                .clk   (clk),
+                .reset (core_reset[i]),
+                .start (core_start[i]),
+                .done  (core_done[i]),
+                .block_id    (core_block_id[i]),
+                .thread_count(core_thread_count[i]),
+                
+                .program_mem_read_valid  (fetcher_read_valid[i]),
+                .program_mem_read_address(fetcher_read_address[i]),
+                .program_mem_read_ready  (fetcher_read_ready[i]),
+                .program_mem_read_data   (fetcher_read_data[i]),
+
+                .data_mem_read_valid   (core_lsu_read_valid),
+                .data_mem_read_address (core_lsu_read_address),
+                .data_mem_read_ready   (core_lsu_read_ready),
+                .data_mem_read_data    (core_lsu_read_data),
+                .data_mem_write_valid  (core_lsu_write_valid),
+                .data_mem_write_address(core_lsu_write_address),
+                .data_mem_write_data   (core_lsu_write_data),
+                .data_mem_write_ready  (core_lsu_write_ready)
+            );
+        end
+    endgenerate
+endmodule
+
+
+====================================================================
+>>> File: dut/src/include/predict_pkg.sv
+====================================================================
+
+package predict_pkg;
+  typedef struct packed {
+    logic        valid;
+    logic        pred_taken;
+    logic [31:0] pred_target;
+    logic [7:0]  warp_id;
+    logic [31:0] pc_at_fetch;
+  } pred_meta_t;
+endpackage
+
+
+====================================================================
+>>> File: dut/src/lsu.sv
+====================================================================
+
+`default_nettype none
+`timescale 1ns/1ns
+
+// LOAD-STORE UNIT
+// > Handles asynchronous memory load and store operations and waits for response
+// > Each thread in each core has its own LSU
+// > LDR, STR instructions are executed here
+module lsu (
+    input  logic clk,
+    input  logic reset,
+    input  logic enable, // If current block has fewer threads than block size, some LSUs will be inactive
+
+    // State
+    input  logic [2:0] core_state,
+
+    // Memory Control Signals
+    input  logic decoded_mem_read_enable,
+    input  logic decoded_mem_write_enable,
+
+    // Registers
+    input  logic [7:0] rs,
+    input  logic [7:0] rt,
+
+    // Data Memory
+    output logic       mem_read_valid,
+    output logic [7:0] mem_read_address,
+    input  logic       mem_read_ready,
+    input  logic [7:0] mem_read_data,
+    output logic       mem_write_valid,
+    output logic [7:0] mem_write_address,
+    output logic [7:0] mem_write_data,
+    input  logic       mem_write_ready,
+
+    // LSU Outputs
+    output logic [1:0] lsu_state,
+    output logic [7:0] lsu_out
+);
+    localparam logic [1:0] IDLE = 2'b00,
+                           REQUESTING = 2'b01,
+                           WAITING = 2'b10,
+                           DONE = 2'b11;
+
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            lsu_state         <= IDLE;
+            lsu_out           <= 8'd0;
+            mem_read_valid    <= 1'b0;
+            mem_read_address  <= 8'd0;
+            mem_write_valid   <= 1'b0;
+            mem_write_address <= 8'd0;
+            mem_write_data    <= 8'd0;
+        end else if (enable) begin
+            // If memory read enable is triggered (LDR instruction)
+            if (decoded_mem_read_enable) begin
+                case (lsu_state)
+                    IDLE: begin
+                        // Only read when core_state = REQUEST
+                        if (core_state == 3'b011) begin
+                            lsu_state <= REQUESTING;
+                        end
+                    end
+                    REQUESTING: begin
+                        mem_read_valid   <= 1'b1;
+                        mem_read_address <= rs;
+                        lsu_state        <= WAITING;
+                    end
+                    WAITING: begin
+                        if (mem_read_ready == 1'b1) begin
+                            mem_read_valid <= 1'b0;
+                            lsu_out        <= mem_read_data;
+                            lsu_state      <= DONE;
+                        end
+                    end
+                    DONE: begin
+                        // Reset when core_state = UPDATE
+                        if (core_state == 3'b110) begin
+                            lsu_state <= IDLE;
+                        end
+                    end
+                endcase
+            end
+
+            // If memory write enable is triggered (STR instruction)
+            if (decoded_mem_write_enable) begin
+                case (lsu_state)
+                    IDLE: begin
+                        // Only write when core_state = REQUEST
+                        if (core_state == 3'b011) begin
+                            lsu_state <= REQUESTING;
+                        end
+                    end
+                    REQUESTING: begin
+                        mem_write_valid   <= 1'b1;
+                        mem_write_address <= rs;
+                        mem_write_data    <= rt;
+                        lsu_state         <= WAITING;
+                    end
+                    WAITING: begin
+                        if (mem_write_ready) begin
+                            mem_write_valid <= 1'b0;
+                            lsu_state       <= DONE;
+                        end
+                    end
+                    DONE: begin
+                        // Reset when core_state = UPDATE
+                        if (core_state == 3'b110) begin
+                            lsu_state <= IDLE;
+                        end
+                    end
+                endcase
+            end
+        end
+        // If not enabled, retain previous outputs/state (matches original behavior)
+    end
+endmodule
+
+
+====================================================================
+>>> File: dut/src/pc.sv
+====================================================================
+
+`default_nettype none
+`timescale 1ns/1ns
+
+// PROGRAM COUNTER
+// > Calculates the next PC for each thread to update to (but currently we assume all threads
+//   update to the same PC and don't support branch divergence)
+// > Currently, each thread in each core has it's own calculation for next PC
+// > The NZP register value is set by the CMP instruction (based on >/=/< comparison) to 
+//   initiate the BRnzp instruction for branching
+module pc #(
+    parameter int DATA_MEM_DATA_BITS     = 8,
+    parameter int PROGRAM_MEM_ADDR_BITS  = 8
+) (
+    input  logic clk,
+    input  logic reset,
+    input  logic enable, // If current block has less threads then block size, some PCs will be inactive
+
+    // State
+    input  logic [2:0]                          core_state,
+
+    // Control Signals
+    input  logic [2:0]                          decoded_nzp,
+    input  logic [DATA_MEM_DATA_BITS-1:0]       decoded_immediate,
+    input  logic                                 decoded_nzp_write_enable,
+    input  logic                                 decoded_pc_mux, 
+
+    // ALU Output - used for alu_out[2:0] to compare with NZP register
+    input  logic [DATA_MEM_DATA_BITS-1:0]       alu_out,
+
+    // Current & Next PCs
+    input  logic [PROGRAM_MEM_ADDR_BITS-1:0]    current_pc,
+    output logic [PROGRAM_MEM_ADDR_BITS-1:0]    next_pc
+);
+    logic [2:0] nzp;
+
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            nzp     <= 3'b000;
+            next_pc <= '0;
+        end else if (enable) begin
+            // Update PC when core_state = EXECUTE
+            if (core_state == 3'b101) begin 
+                if (decoded_pc_mux == 1'b1) begin 
+                    if ((nzp & decoded_nzp) != 3'b000) begin 
+                        // On BRnzp instruction, branch to immediate if NZP case matches previous CMP
+                        next_pc <= decoded_immediate; // (implicit truncation if widths differ, same as original)
+                    end else begin 
+                        // Otherwise, just update to PC + 1 (next line)
+                        next_pc <= current_pc + 1'b1;
+                    end
+                end else begin 
+                    // By default update to PC + 1 (next line)
+                    next_pc <= current_pc + 1'b1;
+                end
+            end   
+
+            // Store NZP when core_state = UPDATE   
+            if (core_state == 3'b110) begin 
+                // Write to NZP register on CMP instruction
+                if (decoded_nzp_write_enable) begin
+                    nzp[2] <= alu_out[2];
+                    nzp[1] <= alu_out[1];
+                    nzp[0] <= alu_out[0];
+                end
+            end      
+        end
+    end
+endmodule
+
+
+====================================================================
+>>> File: dut/src/registers.sv
+====================================================================
+
+`default_nettype none
+`timescale 1ns/1ns
+
+// REGISTER FILE
+// > Each thread within each core has it's own register file with 13 free registers and 3 read-only registers
+// > Read-only registers hold the familiar %blockIdx, %blockDim, and %threadIdx values critical to SIMD
+module registers #(
+    parameter int THREADS_PER_BLOCK = 4,
+    parameter int THREAD_ID         = 0,
+    parameter int DATA_BITS         = 8
+) (
+    input  logic clk,
+    input  logic reset,
+    input  logic enable, // If current block has less threads then block size, some registers will be inactive
+
+    // Kernel Execution
+    input  logic [7:0] block_id,
+
+    // State
+    input  logic [2:0] core_state,
+
+    // Instruction Signals
+    input  logic [3:0] decoded_rd_address,
+    input  logic [3:0] decoded_rs_address,
+    input  logic [3:0] decoded_rt_address,
+
+    // Control Signals
+    input  logic        decoded_reg_write_enable,
+    input  logic [1:0]  decoded_reg_input_mux,
+    input  logic [DATA_BITS-1:0] decoded_immediate,
+
+    // Thread Unit Outputs
+    input  logic [DATA_BITS-1:0] alu_out,
+    input  logic [DATA_BITS-1:0] lsu_out,
+
+    // Registers
+    output logic [7:0] rs,
+    output logic [7:0] rt
+);
+    localparam logic [1:0] ARITHMETIC = 2'b00,
+                           MEMORY     = 2'b01,
+                           CONSTANT   = 2'b10;
+
+    // 16 registers per thread (13 free registers and 3 read-only registers)
+    logic [7:0] registers [16];
+
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            // Empty rs, rt
+            rs <= 8'd0;
+            rt <= 8'd0;
+
+            // Initialize all free registers
+            registers[0]  <= 8'd0;
+            registers[1]  <= 8'd0;
+            registers[2]  <= 8'd0;
+            registers[3]  <= 8'd0;
+            registers[4]  <= 8'd0;
+            registers[5]  <= 8'd0;
+            registers[6]  <= 8'd0;
+            registers[7]  <= 8'd0;
+            registers[8]  <= 8'd0;
+            registers[9]  <= 8'd0;
+            registers[10] <= 8'd0;
+            registers[11] <= 8'd0;
+            registers[12] <= 8'd0;
+
+            // Initialize read-only registers
+            registers[13] <= 8'd0;                      // %blockIdx
+            registers[14] <= THREADS_PER_BLOCK[7:0];    // %blockDim
+            registers[15] <= THREAD_ID[7:0];            // %threadIdx
+        end else if (enable) begin 
+            // [Bad Solution] Shouldn't need to set this every cycle
+            registers[13] <= block_id; // Update the block_id when a new block is issued from dispatcher
+            
+            // Fill rs/rt when core_state = REQUEST
+            if (core_state == 3'b011) begin 
+                rs <= registers[decoded_rs_address];
+                rt <= registers[decoded_rt_address];
+            end
+
+            // Store rd when core_state = UPDATE
+            if (core_state == 3'b110) begin 
+                // Only allow writing to R0 - R12
+                if (decoded_reg_write_enable && (decoded_rd_address < 4'd13)) begin
+                    unique case (decoded_reg_input_mux)
+                        ARITHMETIC: begin 
+                            // ADD, SUB, MUL, DIV
+                            registers[decoded_rd_address] <= alu_out[7:0];
+                        end
+                        MEMORY: begin 
+                            // LDR
+                            registers[decoded_rd_address] <= lsu_out[7:0];
+                        end
+                        CONSTANT: begin 
+                            // CONST
+                            registers[decoded_rd_address] <= decoded_immediate[7:0];
+                        end
+                        default: begin
+                            // no change
+                            registers[decoded_rd_address] <= registers[decoded_rd_address];
+                        end
+                    endcase
+                end
+            end
+        end
+        // When not enabled, hold state (matches original behavior)
+    end
+endmodule
+
+
+====================================================================
+>>> File: dut/src/scheduler.sv
+====================================================================
+
+`default_nettype none
+`timescale 1ns/1ns
+
+// SCHEDULER
+// > Manages the entire control flow of a single compute core processing 1 block
+// 1. FETCH  2. DECODE  3. REQUEST  4. WAIT  5. EXECUTE  6. UPDATE
+// > No branch divergence (all threads assumed to converge)
+module scheduler #(
+    parameter int THREADS_PER_BLOCK = 4
+) (
+    input  logic clk,
+    input  logic reset,
+    input  logic start,
+    
+    // Control Signals
+    input  logic       decoded_mem_read_enable,   // (kept for interface parity; behavior unchanged)
+    input  logic       decoded_mem_write_enable,  // (unused here, as in original)
+    input  logic       decoded_ret,
+
+    // Memory Access State
+    input  logic [2:0]              fetcher_state,
+    input  logic [1:0]              lsu_state   [THREADS_PER_BLOCK],
+
+    // Current & Next PC
+    output logic [7:0]              current_pc,
+    input  logic [7:0]              next_pc     [THREADS_PER_BLOCK],
+
+    // Execution State
+    output logic [2:0]              core_state,
+    output logic                    done
+);
+    localparam logic [2:0] IDLE    = 3'b000, // Waiting to start
+                           FETCH   = 3'b001, // Fetch instructions from program memory
+                           DECODE  = 3'b010, // Decode instructions into control signals
+                           REQUEST = 3'b011, // Trigger async LSU requests (if any)
+                           WAIT    = 3'b100, // Wait for LSUs
+                           EXECUTE = 3'b101, // Execute ALU/PC calculations
+                           UPDATE  = 3'b110, // Update registers, NZP, and PC
+                           DONE_S  = 3'b111; // Done executing this block
+
+    always_ff @(posedge clk) begin 
+        if (reset) begin
+            current_pc <= 8'd0;
+            core_state <= IDLE;
+            done       <= 1'b0;
+        end else begin 
+            unique case (core_state)
+                IDLE: begin
+                    // Here after reset (before kernel is launched, or after previous block)
+                    if (start) begin 
+                        // Start by fetching the next instruction for this block based on PC
+                        core_state <= FETCH;
+                    end
+                end
+
+                FETCH: begin 
+                    // Move on once fetcher_state = FETCHED
+                    if (fetcher_state == 3'b010) begin 
+                        core_state <= DECODE;
+                    end
+                end
+
+                DECODE: begin
+                    // Decode is synchronous so we move on after one cycle
+                    core_state <= REQUEST;
+                end
+
+                REQUEST: begin 
+                    // Request is synchronous so we move on after one cycle
+                    core_state <= WAIT;
+                end
+
+                WAIT: begin
+                    // Wait for all LSUs to finish their request before continuing
+                    logic any_lsu_waiting;   // automatic inside block
+                    any_lsu_waiting = 1'b0;
+                    for (int i = 0; i < THREADS_PER_BLOCK; i++) begin
+                        // Make sure no lsu_state = REQUESTING or WAITING
+                        if (lsu_state[i] == 2'b01 || lsu_state[i] == 2'b10) begin
+                            any_lsu_waiting = 1'b1;
+                            break;
+                        end
+                    end
+
+                    // If no LSU is waiting for a response, move onto the next stage
+                    if (!any_lsu_waiting) begin
+                        core_state <= EXECUTE;
+                    end
+                end
+
+                EXECUTE: begin
+                    // Execute is synchronous so we move on after one cycle
+                    core_state <= UPDATE;
+                end
+
+                UPDATE: begin 
+                if (decoded_ret) begin 
+                    // If we reach a RET instruction, this block is done executing
+                    done       <= 1'b1;
+                    core_state <= DONE_S;
+                end else begin 
+                    // Use lane 0 (valid even when fewer than THREADS_PER_BLOCK are active)
+                    current_pc <= next_pc[0];
+                    core_state <= FETCH;
+                end
+                end
+
+
+                DONE_S: begin 
+                    // no-op (hold state)
+                end
+            endcase
+        end
+    end
+endmodule
 
 

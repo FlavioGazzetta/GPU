@@ -53,7 +53,8 @@ TESTS ?= \
   add_scalar \
   madd_2a_3b \
   quickret \
-  matmul5x5
+  matmul5x5 \
+  branch_pred_even_odd
 
 # ----- Targets -----
 .PHONY: all cpp build run run-all run-debug run-nodebug \

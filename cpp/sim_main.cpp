@@ -18,6 +18,7 @@
 #include "test/tests_add_scalar.hpp"  // defines TEST_ADD_SCALAR
 #include "test/tests_madd.hpp"        // defines TEST_MADD
 #include "test/tests_quickret.hpp"    // defines TEST_QUICKRET
+#include "test/tests_branch_pred.hpp"
 
 // Registry
 static const std::unordered_map<std::string, TestIface*> kTests = {
@@ -27,6 +28,7 @@ static const std::unordered_map<std::string, TestIface*> kTests = {
     { TEST_ADD_SCALAR.name,    &TEST_ADD_SCALAR },
     { TEST_MADD.name,          &TEST_MADD },
     { TEST_QUICKRET.name,      &TEST_QUICKRET },
+    { TEST_BRANCH_PRED.name,   &TEST_BRANCH_PRED }, 
 };
 
 static TestIface* pick_test_from_args(int argc, char** argv) {

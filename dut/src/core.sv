@@ -76,9 +76,48 @@ module core #(
     logic       decoded_pc_mux;                   // PC select (seq vs branch/jump)
     logic       decoded_ret;                      // RET (kernel return)
 
+    // -------- Branch detect (BRnzp raises decoded_pc_mux) --------
+    wire is_branch = (decoded_pc_mux == 1'b1);
+
     // Speculative prefetch hint
     logic        spec_en;
     logic [7:0]  spec_pc;
+
+    // --- Branch predictor wires ---
+    logic                     bp_q_valid;
+    logic [7:0]               bp_q_pc, bp_q_target;
+    logic                     bp_pred_taken;
+    logic [7:0]               bp_pred_target;
+
+    logic                     bp_u_valid;
+    logic [7:0]               bp_u_pc, bp_u_target;
+    logic                     bp_u_taken;
+
+    // Latch the PC of the branch at DECODE so we can update later
+    logic [7:0]               branch_pc_d;     // PC at DECODE
+    logic [7:0]               branch_tgt_d;    // decoded immediate (absolute target)
+    logic                     branch_inflight; // sticky from DECODE → UPDATE
+
+    branch_predictor #(
+      .PC_BITS(8),
+      .BHT_BITS(6),
+      .BHT_SIZE(64),
+      .BTB_SIZE(64)
+    ) bp (
+      .clk(clk),
+      .reset(reset),
+      // query
+      .q_valid      (bp_q_valid),
+      .q_pc         (bp_q_pc),
+      .q_target     (bp_q_target),
+      .q_pred_taken (bp_pred_taken),
+      .q_pred_target(bp_pred_target),
+      // update
+      .u_valid      (bp_u_valid),
+      .u_pc         (bp_u_pc),
+      .u_taken      (bp_u_taken),
+      .u_target     (bp_u_target)
+    );
 
     // ========= Fetcher =========
     fetcher #(
@@ -120,6 +159,57 @@ module core #(
         .decoded_pc_mux(decoded_pc_mux),
         .decoded_ret(decoded_ret)
     );
+
+    // -------- Latch branch info at DECODE; keep it "in flight" until UPDATE --------
+    always_ff @(posedge clk) begin
+      if (reset) begin
+        branch_pc_d     <= '0;
+        branch_tgt_d    <= '0;
+        branch_inflight <= 1'b0;
+      end else begin
+        // Latch on DECODE if a branch is seen
+        if ((core_state == 3'b010) && is_branch) begin
+          branch_pc_d     <= current_pc;
+          branch_tgt_d    <= decoded_immediate;
+          branch_inflight <= 1'b1;
+        end
+        // Clear after we train at UPDATE
+        if ((core_state == 3'b110) && branch_inflight) begin
+          branch_inflight <= 1'b0;
+        end
+      end
+    end
+
+    // -------- Query predictor in DECODE --------
+    assign bp_q_valid  = (core_state == 3'b010) && is_branch;  // DECODE
+    assign bp_q_pc     = current_pc;
+    assign bp_q_target = decoded_immediate;  // absolute target in your ISA
+
+    // -------- Phase A: predictive prefetch into fetcher's p_valid buffer --------
+    always_comb begin
+      spec_en = 1'b0;
+      spec_pc = '0;
+      if ((core_state == 3'b010) && is_branch) begin  // DECODE
+        spec_en = 1'b1;
+        spec_pc = bp_pred_taken ? bp_pred_target : (current_pc + 8'd1);
+      end
+    end
+
+    // -------- Train predictor at UPDATE using final next_pc[0] --------
+    always_comb begin
+      bp_u_valid  = 1'b0;
+      bp_u_pc     = '0;
+      bp_u_taken  = 1'b0;
+      bp_u_target = '0;
+
+      if ((core_state == 3'b110) && branch_inflight) begin  // UPDATE
+        bp_u_valid  = 1'b1;
+        bp_u_pc     = branch_pc_d;
+        bp_u_target = branch_tgt_d;
+        // Taken iff the committed next PC equals the decoded target
+        bp_u_taken  = (next_pc[0] == branch_tgt_d);
+      end
+    end
 
     // ========= Scheduler =========
     scheduler #(
