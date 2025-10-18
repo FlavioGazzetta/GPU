@@ -47,14 +47,21 @@ class alignas(VL_CACHE_LINE_BYTES) Vtop_core final : public VerilatedModule {
         CData/*0:0*/ decoded_alu_output_mux;
         CData/*0:0*/ decoded_pc_mux;
         CData/*0:0*/ decoded_ret;
+        CData/*0:0*/ spec_en;
+        CData/*7:0*/ spec_pc;
         CData/*0:0*/ fetcher_instance__DOT__clk;
         CData/*0:0*/ fetcher_instance__DOT__reset;
+        CData/*7:0*/ fetcher_instance__DOT__spec_pc;
+        CData/*0:0*/ fetcher_instance__DOT__spec_en;
         CData/*2:0*/ fetcher_instance__DOT__core_state;
         CData/*7:0*/ fetcher_instance__DOT__current_pc;
         CData/*0:0*/ fetcher_instance__DOT__mem_read_valid;
         CData/*7:0*/ fetcher_instance__DOT__mem_read_address;
         CData/*0:0*/ fetcher_instance__DOT__mem_read_ready;
         CData/*2:0*/ fetcher_instance__DOT__fetcher_state;
+        CData/*0:0*/ fetcher_instance__DOT__p_valid;
+        CData/*7:0*/ fetcher_instance__DOT__p_pc;
+        CData/*0:0*/ fetcher_instance__DOT__txn_kind;
         CData/*0:0*/ decoder_instance__DOT__clk;
         CData/*0:0*/ decoder_instance__DOT__reset;
         CData/*2:0*/ decoder_instance__DOT__core_state;
@@ -74,6 +81,8 @@ class alignas(VL_CACHE_LINE_BYTES) Vtop_core final : public VerilatedModule {
         CData/*0:0*/ decoder_instance__DOT__decoded_ret;
         CData/*0:0*/ scheduler_instance__DOT__clk;
         CData/*0:0*/ scheduler_instance__DOT__reset;
+    };
+    struct {
         CData/*0:0*/ scheduler_instance__DOT__start;
         CData/*0:0*/ scheduler_instance__DOT__decoded_mem_read_enable;
         CData/*0:0*/ scheduler_instance__DOT__decoded_mem_write_enable;
@@ -81,8 +90,6 @@ class alignas(VL_CACHE_LINE_BYTES) Vtop_core final : public VerilatedModule {
         CData/*2:0*/ scheduler_instance__DOT__fetcher_state;
         CData/*7:0*/ scheduler_instance__DOT__current_pc;
         CData/*2:0*/ scheduler_instance__DOT__core_state;
-    };
-    struct {
         CData/*0:0*/ scheduler_instance__DOT__done;
         CData/*0:0*/ scheduler_instance__DOT__unnamedblk1__DOT__any_lsu_waiting;
         CData/*0:0*/ threads__BRA__0__KET____DOT__alu_instance__DOT__clk;
@@ -140,6 +147,8 @@ class alignas(VL_CACHE_LINE_BYTES) Vtop_core final : public VerilatedModule {
         CData/*7:0*/ threads__BRA__0__KET____DOT__pc_instance__DOT__next_pc;
         CData/*2:0*/ threads__BRA__0__KET____DOT__pc_instance__DOT__nzp;
         CData/*0:0*/ threads__BRA__1__KET____DOT__alu_instance__DOT__clk;
+    };
+    struct {
         CData/*0:0*/ threads__BRA__1__KET____DOT__alu_instance__DOT__reset;
         CData/*0:0*/ threads__BRA__1__KET____DOT__alu_instance__DOT__enable;
         CData/*2:0*/ threads__BRA__1__KET____DOT__alu_instance__DOT__core_state;
@@ -147,8 +156,6 @@ class alignas(VL_CACHE_LINE_BYTES) Vtop_core final : public VerilatedModule {
         CData/*0:0*/ threads__BRA__1__KET____DOT__alu_instance__DOT__decoded_alu_output_mux;
         CData/*7:0*/ threads__BRA__1__KET____DOT__alu_instance__DOT__rs;
         CData/*7:0*/ threads__BRA__1__KET____DOT__alu_instance__DOT__rt;
-    };
-    struct {
         CData/*7:0*/ threads__BRA__1__KET____DOT__alu_instance__DOT__alu_out;
         CData/*0:0*/ threads__BRA__1__KET____DOT__lsu_instance__DOT__clk;
         CData/*0:0*/ threads__BRA__1__KET____DOT__lsu_instance__DOT__reset;
@@ -206,6 +213,8 @@ class alignas(VL_CACHE_LINE_BYTES) Vtop_core final : public VerilatedModule {
         CData/*7:0*/ threads__BRA__2__KET____DOT__alu_instance__DOT__alu_out;
         CData/*0:0*/ threads__BRA__2__KET____DOT__lsu_instance__DOT__clk;
         CData/*0:0*/ threads__BRA__2__KET____DOT__lsu_instance__DOT__reset;
+    };
+    struct {
         CData/*0:0*/ threads__BRA__2__KET____DOT__lsu_instance__DOT__enable;
         CData/*2:0*/ threads__BRA__2__KET____DOT__lsu_instance__DOT__core_state;
         CData/*0:0*/ threads__BRA__2__KET____DOT__lsu_instance__DOT__decoded_mem_read_enable;
@@ -213,8 +222,6 @@ class alignas(VL_CACHE_LINE_BYTES) Vtop_core final : public VerilatedModule {
         CData/*7:0*/ threads__BRA__2__KET____DOT__lsu_instance__DOT__rs;
         CData/*7:0*/ threads__BRA__2__KET____DOT__lsu_instance__DOT__rt;
         CData/*0:0*/ threads__BRA__2__KET____DOT__lsu_instance__DOT__mem_read_valid;
-    };
-    struct {
         CData/*7:0*/ threads__BRA__2__KET____DOT__lsu_instance__DOT__mem_read_address;
         CData/*0:0*/ threads__BRA__2__KET____DOT__lsu_instance__DOT__mem_read_ready;
         CData/*7:0*/ threads__BRA__2__KET____DOT__lsu_instance__DOT__mem_read_data;
@@ -272,6 +279,8 @@ class alignas(VL_CACHE_LINE_BYTES) Vtop_core final : public VerilatedModule {
         CData/*7:0*/ threads__BRA__3__KET____DOT__lsu_instance__DOT__mem_read_address;
         CData/*0:0*/ threads__BRA__3__KET____DOT__lsu_instance__DOT__mem_read_ready;
         CData/*7:0*/ threads__BRA__3__KET____DOT__lsu_instance__DOT__mem_read_data;
+    };
+    struct {
         CData/*0:0*/ threads__BRA__3__KET____DOT__lsu_instance__DOT__mem_write_valid;
         CData/*7:0*/ threads__BRA__3__KET____DOT__lsu_instance__DOT__mem_write_address;
         CData/*7:0*/ threads__BRA__3__KET____DOT__lsu_instance__DOT__mem_write_data;
@@ -279,8 +288,6 @@ class alignas(VL_CACHE_LINE_BYTES) Vtop_core final : public VerilatedModule {
         CData/*1:0*/ threads__BRA__3__KET____DOT__lsu_instance__DOT__lsu_state;
         CData/*7:0*/ threads__BRA__3__KET____DOT__lsu_instance__DOT__lsu_out;
         CData/*0:0*/ threads__BRA__3__KET____DOT__register_instance__DOT__clk;
-    };
-    struct {
         CData/*0:0*/ threads__BRA__3__KET____DOT__register_instance__DOT__reset;
         CData/*0:0*/ threads__BRA__3__KET____DOT__register_instance__DOT__enable;
         CData/*7:0*/ threads__BRA__3__KET____DOT__register_instance__DOT__block_id;
@@ -311,6 +318,7 @@ class alignas(VL_CACHE_LINE_BYTES) Vtop_core final : public VerilatedModule {
         SData/*15:0*/ instruction;
         SData/*15:0*/ fetcher_instance__DOT__mem_read_data;
         SData/*15:0*/ fetcher_instance__DOT__instruction;
+        SData/*15:0*/ fetcher_instance__DOT__p_instr;
         SData/*15:0*/ decoder_instance__DOT__instruction;
         SData/*8:0*/ threads__BRA__0__KET____DOT__alu_instance__DOT__unnamedblk1__DOT__diff;
         SData/*8:0*/ threads__BRA__1__KET____DOT__alu_instance__DOT__unnamedblk1__DOT__diff;
@@ -327,6 +335,7 @@ class alignas(VL_CACHE_LINE_BYTES) Vtop_core final : public VerilatedModule {
         VlUnpacked<CData/*1:0*/, 4> lsu_state;
         VlUnpacked<CData/*7:0*/, 4> lsu_out;
         VlUnpacked<CData/*7:0*/, 4> alu_out;
+        VlUnpacked<CData/*7:0*/, 4> current_pc_unused;
         VlUnpacked<CData/*1:0*/, 4> scheduler_instance__DOT__lsu_state;
         VlUnpacked<CData/*7:0*/, 4> scheduler_instance__DOT__next_pc;
         VlUnpacked<CData/*7:0*/, 16> threads__BRA__0__KET____DOT__register_instance__DOT__registers;

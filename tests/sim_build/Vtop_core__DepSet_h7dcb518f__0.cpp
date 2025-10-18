@@ -11,6 +11,14 @@ void Vtop_core___ico_sequent__TOP__tb_top_stub__DOT__dut__DOT__cores__BRA__0__KE
     Vtop__Syms* const __restrict vlSymsp VL_ATTR_UNUSED = vlSelf->vlSymsp;
     auto& vlSelfRef = std::ref(*vlSelf).get();
     // Body
+    vlSelfRef.threads__BRA__1__KET____DOT__pc_instance__DOT__current_pc 
+        = vlSelfRef.current_pc_unused[1U];
+    vlSelfRef.threads__BRA__2__KET____DOT__pc_instance__DOT__current_pc 
+        = vlSelfRef.current_pc_unused[2U];
+    vlSelfRef.threads__BRA__3__KET____DOT__pc_instance__DOT__current_pc 
+        = vlSelfRef.current_pc_unused[3U];
+    vlSelfRef.fetcher_instance__DOT__spec_en = vlSelfRef.spec_en;
+    vlSelfRef.fetcher_instance__DOT__spec_pc = vlSelfRef.spec_pc;
     vlSelfRef.fetcher_state = vlSelfRef.fetcher_instance__DOT__fetcher_state;
     vlSelfRef.instruction = vlSelfRef.fetcher_instance__DOT__instruction;
     vlSelfRef.decoded_ret = vlSelfRef.decoder_instance__DOT__decoded_ret;
@@ -22,6 +30,7 @@ void Vtop_core___ico_sequent__TOP__tb_top_stub__DOT__dut__DOT__cores__BRA__0__KE
     vlSelfRef.next_pc[1U] = vlSelfRef.threads__BRA__1__KET____DOT__pc_instance__DOT__next_pc;
     vlSelfRef.next_pc[2U] = vlSelfRef.threads__BRA__2__KET____DOT__pc_instance__DOT__next_pc;
     vlSelfRef.next_pc[3U] = vlSelfRef.threads__BRA__3__KET____DOT__pc_instance__DOT__next_pc;
+    vlSelfRef.current_pc = vlSelfRef.scheduler_instance__DOT__current_pc;
     vlSelfRef.program_mem_read_address = vlSelfRef.fetcher_instance__DOT__mem_read_address;
     vlSelfRef.program_mem_read_valid = vlSelfRef.fetcher_instance__DOT__mem_read_valid;
     vlSelfRef.decoded_rd_address = vlSelfRef.decoder_instance__DOT__decoded_rd_address;
@@ -48,7 +57,6 @@ void Vtop_core___ico_sequent__TOP__tb_top_stub__DOT__dut__DOT__cores__BRA__0__KE
     vlSelfRef.lsu_out[1U] = vlSelfRef.threads__BRA__1__KET____DOT__lsu_instance__DOT__lsu_out;
     vlSelfRef.lsu_out[2U] = vlSelfRef.threads__BRA__2__KET____DOT__lsu_instance__DOT__lsu_out;
     vlSelfRef.lsu_out[3U] = vlSelfRef.threads__BRA__3__KET____DOT__lsu_instance__DOT__lsu_out;
-    vlSelfRef.current_pc = vlSelfRef.scheduler_instance__DOT__current_pc;
     vlSelfRef.decoded_mem_read_enable = vlSelfRef.decoder_instance__DOT__decoded_mem_read_enable;
     vlSelfRef.decoded_mem_write_enable = vlSelfRef.decoder_instance__DOT__decoded_mem_write_enable;
     vlSelfRef.decoded_immediate = vlSelfRef.decoder_instance__DOT__decoded_immediate;
@@ -119,6 +127,9 @@ void Vtop_core___ico_sequent__TOP__tb_top_stub__DOT__dut__DOT__cores__BRA__0__KE
         = vlSelfRef.next_pc[2U];
     vlSelfRef.scheduler_instance__DOT__next_pc[3U] 
         = vlSelfRef.next_pc[3U];
+    vlSelfRef.fetcher_instance__DOT__current_pc = vlSelfRef.current_pc;
+    vlSelfRef.threads__BRA__0__KET____DOT__pc_instance__DOT__current_pc 
+        = vlSelfRef.current_pc;
     vlSelfRef.threads__BRA__0__KET____DOT__register_instance__DOT__decoded_rd_address 
         = vlSelfRef.decoded_rd_address;
     vlSelfRef.threads__BRA__1__KET____DOT__register_instance__DOT__decoded_rd_address 
@@ -207,15 +218,6 @@ void Vtop_core___ico_sequent__TOP__tb_top_stub__DOT__dut__DOT__cores__BRA__0__KE
         = vlSelfRef.lsu_out[2U];
     vlSelfRef.threads__BRA__3__KET____DOT__register_instance__DOT__lsu_out 
         = vlSelfRef.lsu_out[3U];
-    vlSelfRef.fetcher_instance__DOT__current_pc = vlSelfRef.current_pc;
-    vlSelfRef.threads__BRA__0__KET____DOT__pc_instance__DOT__current_pc 
-        = vlSelfRef.current_pc;
-    vlSelfRef.threads__BRA__1__KET____DOT__pc_instance__DOT__current_pc 
-        = vlSelfRef.current_pc;
-    vlSelfRef.threads__BRA__2__KET____DOT__pc_instance__DOT__current_pc 
-        = vlSelfRef.current_pc;
-    vlSelfRef.threads__BRA__3__KET____DOT__pc_instance__DOT__current_pc 
-        = vlSelfRef.current_pc;
     vlSelfRef.scheduler_instance__DOT__decoded_mem_read_enable 
         = vlSelfRef.decoded_mem_read_enable;
     vlSelfRef.threads__BRA__0__KET____DOT__lsu_instance__DOT__decoded_mem_read_enable 
@@ -587,6 +589,14 @@ void Vtop_core___ico_sequent__TOP__tb_top_stub__DOT__dut__DOT__cores__BRA__1__KE
     Vtop__Syms* const __restrict vlSymsp VL_ATTR_UNUSED = vlSelf->vlSymsp;
     auto& vlSelfRef = std::ref(*vlSelf).get();
     // Body
+    vlSelfRef.threads__BRA__1__KET____DOT__pc_instance__DOT__current_pc 
+        = vlSelfRef.current_pc_unused[1U];
+    vlSelfRef.threads__BRA__2__KET____DOT__pc_instance__DOT__current_pc 
+        = vlSelfRef.current_pc_unused[2U];
+    vlSelfRef.threads__BRA__3__KET____DOT__pc_instance__DOT__current_pc 
+        = vlSelfRef.current_pc_unused[3U];
+    vlSelfRef.fetcher_instance__DOT__spec_en = vlSelfRef.spec_en;
+    vlSelfRef.fetcher_instance__DOT__spec_pc = vlSelfRef.spec_pc;
     vlSelfRef.fetcher_state = vlSelfRef.fetcher_instance__DOT__fetcher_state;
     vlSelfRef.instruction = vlSelfRef.fetcher_instance__DOT__instruction;
     vlSelfRef.decoded_ret = vlSelfRef.decoder_instance__DOT__decoded_ret;
@@ -598,6 +608,7 @@ void Vtop_core___ico_sequent__TOP__tb_top_stub__DOT__dut__DOT__cores__BRA__1__KE
     vlSelfRef.next_pc[1U] = vlSelfRef.threads__BRA__1__KET____DOT__pc_instance__DOT__next_pc;
     vlSelfRef.next_pc[2U] = vlSelfRef.threads__BRA__2__KET____DOT__pc_instance__DOT__next_pc;
     vlSelfRef.next_pc[3U] = vlSelfRef.threads__BRA__3__KET____DOT__pc_instance__DOT__next_pc;
+    vlSelfRef.current_pc = vlSelfRef.scheduler_instance__DOT__current_pc;
     vlSelfRef.program_mem_read_address = vlSelfRef.fetcher_instance__DOT__mem_read_address;
     vlSelfRef.program_mem_read_valid = vlSelfRef.fetcher_instance__DOT__mem_read_valid;
     vlSelfRef.decoded_rd_address = vlSelfRef.decoder_instance__DOT__decoded_rd_address;
@@ -624,7 +635,6 @@ void Vtop_core___ico_sequent__TOP__tb_top_stub__DOT__dut__DOT__cores__BRA__1__KE
     vlSelfRef.lsu_out[1U] = vlSelfRef.threads__BRA__1__KET____DOT__lsu_instance__DOT__lsu_out;
     vlSelfRef.lsu_out[2U] = vlSelfRef.threads__BRA__2__KET____DOT__lsu_instance__DOT__lsu_out;
     vlSelfRef.lsu_out[3U] = vlSelfRef.threads__BRA__3__KET____DOT__lsu_instance__DOT__lsu_out;
-    vlSelfRef.current_pc = vlSelfRef.scheduler_instance__DOT__current_pc;
     vlSelfRef.decoded_mem_read_enable = vlSelfRef.decoder_instance__DOT__decoded_mem_read_enable;
     vlSelfRef.decoded_mem_write_enable = vlSelfRef.decoder_instance__DOT__decoded_mem_write_enable;
     vlSelfRef.decoded_immediate = vlSelfRef.decoder_instance__DOT__decoded_immediate;
@@ -698,6 +708,9 @@ void Vtop_core___ico_sequent__TOP__tb_top_stub__DOT__dut__DOT__cores__BRA__1__KE
         = vlSelfRef.next_pc[2U];
     vlSelfRef.scheduler_instance__DOT__next_pc[3U] 
         = vlSelfRef.next_pc[3U];
+    vlSelfRef.fetcher_instance__DOT__current_pc = vlSelfRef.current_pc;
+    vlSelfRef.threads__BRA__0__KET____DOT__pc_instance__DOT__current_pc 
+        = vlSelfRef.current_pc;
     vlSelfRef.threads__BRA__0__KET____DOT__register_instance__DOT__decoded_rd_address 
         = vlSelfRef.decoded_rd_address;
     vlSelfRef.threads__BRA__1__KET____DOT__register_instance__DOT__decoded_rd_address 
@@ -786,15 +799,6 @@ void Vtop_core___ico_sequent__TOP__tb_top_stub__DOT__dut__DOT__cores__BRA__1__KE
         = vlSelfRef.lsu_out[2U];
     vlSelfRef.threads__BRA__3__KET____DOT__register_instance__DOT__lsu_out 
         = vlSelfRef.lsu_out[3U];
-    vlSelfRef.fetcher_instance__DOT__current_pc = vlSelfRef.current_pc;
-    vlSelfRef.threads__BRA__0__KET____DOT__pc_instance__DOT__current_pc 
-        = vlSelfRef.current_pc;
-    vlSelfRef.threads__BRA__1__KET____DOT__pc_instance__DOT__current_pc 
-        = vlSelfRef.current_pc;
-    vlSelfRef.threads__BRA__2__KET____DOT__pc_instance__DOT__current_pc 
-        = vlSelfRef.current_pc;
-    vlSelfRef.threads__BRA__3__KET____DOT__pc_instance__DOT__current_pc 
-        = vlSelfRef.current_pc;
     vlSelfRef.scheduler_instance__DOT__decoded_mem_read_enable 
         = vlSelfRef.decoded_mem_read_enable;
     vlSelfRef.threads__BRA__0__KET____DOT__lsu_instance__DOT__decoded_mem_read_enable 

@@ -3,7 +3,7 @@
 
 // COMPUTE CORE
 // > Handles processing 1 block at a time
-// > The core also has it's own scheduler to manage control flow
+// > The core also has its own scheduler to manage control flow
 // > Each core contains 1 fetcher & decoder, and register files, ALUs, LSUs, PC for each thread
 module core #(
     parameter int DATA_MEM_ADDR_BITS     = 8,
@@ -39,45 +39,56 @@ module core #(
     output logic [DATA_MEM_DATA_BITS-1:0]                      data_mem_write_data  [THREADS_PER_BLOCK],
     input  logic [THREADS_PER_BLOCK-1:0]                       data_mem_write_ready
 );
-    // State
+    // ========= Core-wide state =========
     logic [2:0]  core_state;
     logic [2:0]  fetcher_state;
     logic [15:0] instruction;
 
-    // Intermediate Signals
+    // ========= Inter-thread bundles =========
+    // NOTE: Only ONE thread may drive current_pc (see below).
     logic [7:0] current_pc;
+
     logic [7:0] next_pc [THREADS_PER_BLOCK];
     logic [7:0] rs      [THREADS_PER_BLOCK];
     logic [7:0] rt      [THREADS_PER_BLOCK];
     logic [1:0] lsu_state [THREADS_PER_BLOCK];
     logic [7:0] lsu_out   [THREADS_PER_BLOCK];
     logic [7:0] alu_out   [THREADS_PER_BLOCK];
-    
-    // Decoded Instruction Signals
+
+    // For “other” threads’ current_pc outputs (to avoid multiple drivers)
+    logic [7:0] current_pc_unused [THREADS_PER_BLOCK];
+
+    // ========= Decoded Instruction =========
     logic [3:0] decoded_rd_address;
     logic [3:0] decoded_rs_address;
     logic [3:0] decoded_rt_address;
     logic [2:0] decoded_nzp;
     logic [7:0] decoded_immediate;
 
-    // Decoded Control Signals
-    logic       decoded_reg_write_enable;         // Enable writing to a register
-    logic       decoded_mem_read_enable;          // Enable reading from memory
-    logic       decoded_mem_write_enable;         // Enable writing to memory
-    logic       decoded_nzp_write_enable;         // Enable writing to NZP register
-    logic [1:0] decoded_reg_input_mux;            // Select input to register
-    logic [1:0] decoded_alu_arithmetic_mux;       // Select arithmetic operation
-    logic       decoded_alu_output_mux;           // Select operation in ALU
-    logic       decoded_pc_mux;                   // Select source of next PC
-    logic       decoded_ret;
+    // Decoded Control
+    logic       decoded_reg_write_enable;         // writeback enable
+    logic       decoded_mem_read_enable;          // LSU read
+    logic       decoded_mem_write_enable;         // LSU write
+    logic       decoded_nzp_write_enable;         // NZP write
+    logic [1:0] decoded_reg_input_mux;            // writeback mux
+    logic [1:0] decoded_alu_arithmetic_mux;       // ALU arithmetic op
+    logic       decoded_alu_output_mux;           // ALU select (arith vs pass)
+    logic       decoded_pc_mux;                   // PC select (seq vs branch/jump)
+    logic       decoded_ret;                      // RET (kernel return)
 
-    // Fetcher
+    // Speculative prefetch hint
+    logic        spec_en;
+    logic [7:0]  spec_pc;
+
+    // ========= Fetcher =========
     fetcher #(
         .PROGRAM_MEM_ADDR_BITS(PROGRAM_MEM_ADDR_BITS),
         .PROGRAM_MEM_DATA_BITS(PROGRAM_MEM_DATA_BITS)
     ) fetcher_instance (
         .clk(clk),
         .reset(reset),
+        .spec_en(spec_en),
+        .spec_pc(spec_pc),
         .core_state(core_state),
         .current_pc(current_pc),
         .mem_read_valid(program_mem_read_valid),
@@ -85,10 +96,10 @@ module core #(
         .mem_read_ready(program_mem_read_ready),
         .mem_read_data(program_mem_read_data),
         .fetcher_state(fetcher_state),
-        .instruction(instruction) 
+        .instruction(instruction)
     );
 
-    // Decoder
+    // ========= Decoder =========
     decoder decoder_instance (
         .clk(clk),
         .reset(reset),
@@ -110,7 +121,7 @@ module core #(
         .decoded_ret(decoded_ret)
     );
 
-    // Scheduler
+    // ========= Scheduler =========
     scheduler #(
         .THREADS_PER_BLOCK(THREADS_PER_BLOCK)
     ) scheduler_instance (
@@ -128,7 +139,7 @@ module core #(
         .done(done)
     );
 
-    // Dedicated ALU, LSU, registers, & PC unit for each thread this core has capacity for
+    // ========= Per-thread units =========
     genvar i;
     generate
         for (i = 0; i < THREADS_PER_BLOCK; i = i + 1) begin : threads
@@ -204,7 +215,8 @@ module core #(
                 .decoded_nzp_write_enable(decoded_nzp_write_enable),
                 .decoded_pc_mux(decoded_pc_mux),
                 .alu_out(alu_out[i]),
-                .current_pc(current_pc),
+                // IMPORTANT: Only one thread drives current_pc.
+                .current_pc( (i == 0) ? current_pc : current_pc_unused[i] ),
                 .next_pc(next_pc[i])
             );
         end

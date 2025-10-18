@@ -83,17 +83,26 @@ class GpuEnv(uvm_env):
         self.dw_mon.ap.connect(self.sb.analysis_export)
         # instr_mon feeds coverage via coverage.sample_cov (optional, handled in monitors)
 
+# tests/uvm_env.py
 class GpuTest(uvm_test):
     """Base UVM test that builds env; subclasses implement do_run()."""
     def build_phase(self):
         super().build_phase()
         self.env = GpuEnv("env", self)
 
-        # Ensure 'dut' is visible from this test scope downward even if the
-        # cocotb-side prep ran before the UVM tree existed.
+        # Ensure 'dut' is available in the DB (works whether ConfigDB already has it or not)
         try:
             _ = ConfigDB().get(self, "", "dut")
         except Exception:
             dut = cocotb.top
             ConfigDB().set(self, "*", "dut", dut)
+
+        # ---- Start the decoder/LSU tracer (core0/thread0) ----
+        try:
+            from monitors import trace_decoder_and_lsu
+            cocotb.start_soon(trace_decoder_and_lsu(cocotb.top))
+        except Exception as e:
+            # If not under cocotb yet (or tracer not importable), just continue silently
+            pass
+
 

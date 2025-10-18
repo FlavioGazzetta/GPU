@@ -58,6 +58,9 @@ VL_ATTR_COLD void Vtop_core___ctor_var_reset(Vtop_core* vlSelf) {
     for (int __Vi0 = 0; __Vi0 < 4; ++__Vi0) {
         vlSelf->alu_out[__Vi0] = 0;
     }
+    for (int __Vi0 = 0; __Vi0 < 4; ++__Vi0) {
+        vlSelf->current_pc_unused[__Vi0] = 0;
+    }
     vlSelf->decoded_rd_address = 0;
     vlSelf->decoded_rs_address = 0;
     vlSelf->decoded_rt_address = 0;
@@ -72,8 +75,12 @@ VL_ATTR_COLD void Vtop_core___ctor_var_reset(Vtop_core* vlSelf) {
     vlSelf->decoded_alu_output_mux = 0;
     vlSelf->decoded_pc_mux = 0;
     vlSelf->decoded_ret = 0;
+    vlSelf->spec_en = 0;
+    vlSelf->spec_pc = 0;
     vlSelf->fetcher_instance__DOT__clk = 0;
     vlSelf->fetcher_instance__DOT__reset = 0;
+    vlSelf->fetcher_instance__DOT__spec_pc = 0;
+    vlSelf->fetcher_instance__DOT__spec_en = 0;
     vlSelf->fetcher_instance__DOT__core_state = 0;
     vlSelf->fetcher_instance__DOT__current_pc = 0;
     vlSelf->fetcher_instance__DOT__mem_read_valid = 0;
@@ -82,6 +89,10 @@ VL_ATTR_COLD void Vtop_core___ctor_var_reset(Vtop_core* vlSelf) {
     vlSelf->fetcher_instance__DOT__mem_read_data = 0;
     vlSelf->fetcher_instance__DOT__fetcher_state = 0;
     vlSelf->fetcher_instance__DOT__instruction = 0;
+    vlSelf->fetcher_instance__DOT__p_valid = 0;
+    vlSelf->fetcher_instance__DOT__p_pc = 0;
+    vlSelf->fetcher_instance__DOT__p_instr = 0;
+    vlSelf->fetcher_instance__DOT__txn_kind = 0;
     vlSelf->decoder_instance__DOT__clk = 0;
     vlSelf->decoder_instance__DOT__reset = 0;
     vlSelf->decoder_instance__DOT__core_state = 0;

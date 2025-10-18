@@ -14,11 +14,19 @@
 #include "test/test_iface.hpp"
 #include "test/matadd.hpp"       // defines TEST_MATADD
 #include "test/matmul5x5.hpp"    // defines TEST_MATMUL5x5
+#include "test/tests_memcpy.hpp"      // defines TEST_MEMCPY
+#include "test/tests_add_scalar.hpp"  // defines TEST_ADD_SCALAR
+#include "test/tests_madd.hpp"        // defines TEST_MADD
+#include "test/tests_quickret.hpp"    // defines TEST_QUICKRET
 
 // Registry
 static const std::unordered_map<std::string, TestIface*> kTests = {
-    { TEST_MATADD.name,    &TEST_MATADD },
-    { TEST_MATMUL5x5.name, &TEST_MATMUL5x5 }
+    { TEST_MATADD.name,        &TEST_MATADD },
+    { TEST_MATMUL5x5.name,     &TEST_MATMUL5x5 },
+    { TEST_MEMCPY.name,        &TEST_MEMCPY },
+    { TEST_ADD_SCALAR.name,    &TEST_ADD_SCALAR },
+    { TEST_MADD.name,          &TEST_MADD },
+    { TEST_QUICKRET.name,      &TEST_QUICKRET },
 };
 
 static TestIface* pick_test_from_args(int argc, char** argv) {

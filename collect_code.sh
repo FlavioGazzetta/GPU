@@ -1,7 +1,7 @@
 #!/bin/bash
 # Combine all Python (.py) and SystemVerilog (.sv) source files into one text file
 # with their file path as a header above each code block.
-# Only searches inside 'cpp' and 'src' directories.
+# Only searches inside 'dut' and 'tests' directories, excluding 'sim_build'.
 
 OUTPUT_FILE="all_code.txt"
 
@@ -11,8 +11,9 @@ echo "# Combined source code dump" > "$OUTPUT_FILE"
 echo "# Generated on $(date)" >> "$OUTPUT_FILE"
 echo "" >> "$OUTPUT_FILE"
 
-# Find and process .py and .sv files only inside cpp/ and src/
-find dut/src -type f \( -name "*.cpp" -o -name "*.hpp" -o -name "*.sv" \) | sort | while read -r FILE; do
+# Find and process .py, .sv, .cpp, and .hpp files, excluding sim_build
+find  tests -type f \( -name "*.cpp" -o -name "*.hpp" -o -name "*.sv" -o -name "*.py" \) \
+    -not -path "*/sim_build/*" | sort | while read -r FILE; do
     echo "Processing $FILE ..."
     {
         echo "===================================================================="

@@ -1,4 +1,3 @@
-# tests/tests_uvm.py
 import cocotb
 from pyuvm import uvm_root, ConfigDB
 
@@ -10,6 +9,7 @@ from uvm_sequences import (
     TestBranchNotTaken,
     TestTailThreads,
     TestControllerLatency,
+    #TestPrefetch,
 )
 
 def _prep(dut):
@@ -47,3 +47,8 @@ async def uvm_tail_threads(dut):
 async def uvm_ctrl_latency(dut):
     _prep(dut)
     await uvm_root().run_test("TestControllerLatency")
+
+# @cocotb.test()
+# async def uvm_prefetch(dut):
+#     _prep(dut)
+#     await uvm_root().run_test("TestPrefetch")

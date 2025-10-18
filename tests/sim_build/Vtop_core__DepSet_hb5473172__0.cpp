@@ -12,34 +12,96 @@ void Vtop_core___nba_sequent__TOP__tb_top_stub__DOT__dut__DOT__cores__BRA__0__KE
     // Init
     CData/*2:0*/ __Vdly__fetcher_instance__DOT__fetcher_state;
     __Vdly__fetcher_instance__DOT__fetcher_state = 0;
+    CData/*0:0*/ __Vdly__fetcher_instance__DOT__mem_read_valid;
+    __Vdly__fetcher_instance__DOT__mem_read_valid = 0;
+    CData/*7:0*/ __Vdly__fetcher_instance__DOT__mem_read_address;
+    __Vdly__fetcher_instance__DOT__mem_read_address = 0;
+    CData/*0:0*/ __Vdly__fetcher_instance__DOT__p_valid;
+    __Vdly__fetcher_instance__DOT__p_valid = 0;
+    CData/*7:0*/ __Vdly__fetcher_instance__DOT__p_pc;
+    __Vdly__fetcher_instance__DOT__p_pc = 0;
+    SData/*15:0*/ __Vdly__fetcher_instance__DOT__p_instr;
+    __Vdly__fetcher_instance__DOT__p_instr = 0;
+    CData/*0:0*/ __Vdly__fetcher_instance__DOT__txn_kind;
+    __Vdly__fetcher_instance__DOT__txn_kind = 0;
     // Body
+    __Vdly__fetcher_instance__DOT__p_valid = vlSelfRef.fetcher_instance__DOT__p_valid;
+    __Vdly__fetcher_instance__DOT__p_pc = vlSelfRef.fetcher_instance__DOT__p_pc;
+    __Vdly__fetcher_instance__DOT__p_instr = vlSelfRef.fetcher_instance__DOT__p_instr;
+    __Vdly__fetcher_instance__DOT__txn_kind = vlSelfRef.fetcher_instance__DOT__txn_kind;
     __Vdly__fetcher_instance__DOT__fetcher_state = vlSelfRef.fetcher_instance__DOT__fetcher_state;
+    __Vdly__fetcher_instance__DOT__mem_read_valid = vlSelfRef.fetcher_instance__DOT__mem_read_valid;
+    __Vdly__fetcher_instance__DOT__mem_read_address 
+        = vlSelfRef.fetcher_instance__DOT__mem_read_address;
     if (vlSelfRef.fetcher_instance__DOT__reset) {
         __Vdly__fetcher_instance__DOT__fetcher_state = 0U;
-        vlSelfRef.fetcher_instance__DOT__mem_read_valid = 0U;
-        vlSelfRef.fetcher_instance__DOT__mem_read_address = 0U;
+        __Vdly__fetcher_instance__DOT__mem_read_valid = 0U;
+        __Vdly__fetcher_instance__DOT__mem_read_address = 0U;
         vlSelfRef.fetcher_instance__DOT__instruction = 0U;
-    } else if ((0U == (IData)(vlSelfRef.fetcher_instance__DOT__fetcher_state))) {
-        if ((1U == (IData)(vlSelfRef.fetcher_instance__DOT__core_state))) {
-            __Vdly__fetcher_instance__DOT__fetcher_state = 1U;
-            vlSelfRef.fetcher_instance__DOT__mem_read_valid = 1U;
-            vlSelfRef.fetcher_instance__DOT__mem_read_address 
-                = vlSelfRef.fetcher_instance__DOT__current_pc;
+        __Vdly__fetcher_instance__DOT__p_valid = 0U;
+        __Vdly__fetcher_instance__DOT__p_pc = 0U;
+        __Vdly__fetcher_instance__DOT__p_instr = 0U;
+        __Vdly__fetcher_instance__DOT__txn_kind = 0U;
+    } else {
+        if (((((IData)(vlSelfRef.fetcher_instance__DOT__spec_en) 
+               & (~ (IData)(vlSelfRef.fetcher_instance__DOT__p_valid))) 
+              & (1U != (IData)(vlSelfRef.fetcher_instance__DOT__fetcher_state))) 
+             & (~ (IData)(vlSelfRef.fetcher_instance__DOT__mem_read_valid)))) {
+            __Vdly__fetcher_instance__DOT__mem_read_valid = 1U;
+            __Vdly__fetcher_instance__DOT__mem_read_address 
+                = vlSelfRef.fetcher_instance__DOT__spec_pc;
+            __Vdly__fetcher_instance__DOT__txn_kind = 1U;
         }
-    } else if ((1U == (IData)(vlSelfRef.fetcher_instance__DOT__fetcher_state))) {
-        if (vlSelfRef.fetcher_instance__DOT__mem_read_ready) {
-            __Vdly__fetcher_instance__DOT__fetcher_state = 2U;
-            vlSelfRef.fetcher_instance__DOT__instruction 
-                = vlSelfRef.fetcher_instance__DOT__mem_read_data;
-            vlSelfRef.fetcher_instance__DOT__mem_read_valid = 0U;
+        if (((IData)(vlSelfRef.fetcher_instance__DOT__mem_read_valid) 
+             & (IData)(vlSelfRef.fetcher_instance__DOT__mem_read_ready))) {
+            __Vdly__fetcher_instance__DOT__mem_read_valid = 0U;
+            if (vlSelfRef.fetcher_instance__DOT__txn_kind) {
+                __Vdly__fetcher_instance__DOT__p_valid = 1U;
+                __Vdly__fetcher_instance__DOT__p_pc 
+                    = vlSelfRef.fetcher_instance__DOT__mem_read_address;
+                __Vdly__fetcher_instance__DOT__p_instr 
+                    = vlSelfRef.fetcher_instance__DOT__mem_read_data;
+            } else {
+                vlSelfRef.fetcher_instance__DOT__instruction 
+                    = vlSelfRef.fetcher_instance__DOT__mem_read_data;
+                __Vdly__fetcher_instance__DOT__fetcher_state = 2U;
+            }
         }
-    } else if ((2U == (IData)(vlSelfRef.fetcher_instance__DOT__fetcher_state))) {
-        if ((2U == (IData)(vlSelfRef.fetcher_instance__DOT__core_state))) {
-            __Vdly__fetcher_instance__DOT__fetcher_state = 0U;
+        if ((0U == (IData)(vlSelfRef.fetcher_instance__DOT__fetcher_state))) {
+            if ((1U == (IData)(vlSelfRef.fetcher_instance__DOT__core_state))) {
+                if (((IData)(vlSelfRef.fetcher_instance__DOT__p_valid) 
+                     & ((IData)(vlSelfRef.fetcher_instance__DOT__p_pc) 
+                        == (IData)(vlSelfRef.fetcher_instance__DOT__current_pc)))) {
+                    vlSelfRef.fetcher_instance__DOT__instruction 
+                        = vlSelfRef.fetcher_instance__DOT__p_instr;
+                    __Vdly__fetcher_instance__DOT__p_valid = 0U;
+                    __Vdly__fetcher_instance__DOT__fetcher_state = 2U;
+                } else {
+                    __Vdly__fetcher_instance__DOT__mem_read_valid = 1U;
+                    __Vdly__fetcher_instance__DOT__mem_read_address 
+                        = vlSelfRef.fetcher_instance__DOT__current_pc;
+                    __Vdly__fetcher_instance__DOT__txn_kind = 0U;
+                    __Vdly__fetcher_instance__DOT__fetcher_state = 1U;
+                }
+            }
+        } else if ((1U != (IData)(vlSelfRef.fetcher_instance__DOT__fetcher_state))) {
+            if ((2U == (IData)(vlSelfRef.fetcher_instance__DOT__fetcher_state))) {
+                if ((2U == (IData)(vlSelfRef.fetcher_instance__DOT__core_state))) {
+                    __Vdly__fetcher_instance__DOT__fetcher_state = 0U;
+                }
+            }
         }
     }
+    vlSelfRef.fetcher_instance__DOT__p_valid = __Vdly__fetcher_instance__DOT__p_valid;
+    vlSelfRef.fetcher_instance__DOT__p_pc = __Vdly__fetcher_instance__DOT__p_pc;
+    vlSelfRef.fetcher_instance__DOT__p_instr = __Vdly__fetcher_instance__DOT__p_instr;
+    vlSelfRef.fetcher_instance__DOT__txn_kind = __Vdly__fetcher_instance__DOT__txn_kind;
     vlSelfRef.fetcher_instance__DOT__fetcher_state 
         = __Vdly__fetcher_instance__DOT__fetcher_state;
+    vlSelfRef.fetcher_instance__DOT__mem_read_valid 
+        = __Vdly__fetcher_instance__DOT__mem_read_valid;
+    vlSelfRef.fetcher_instance__DOT__mem_read_address 
+        = __Vdly__fetcher_instance__DOT__mem_read_address;
     vlSelfRef.fetcher_state = vlSelfRef.fetcher_instance__DOT__fetcher_state;
     vlSelfRef.instruction = vlSelfRef.fetcher_instance__DOT__instruction;
     vlSelfRef.program_mem_read_valid = vlSelfRef.fetcher_instance__DOT__mem_read_valid;
@@ -1361,16 +1423,10 @@ void Vtop_core___nba_sequent__TOP__tb_top_stub__DOT__dut__DOT__cores__BRA__0__KE
         = vlSelfRef.current_pc;
     vlSelfRef.threads__BRA__0__KET____DOT__pc_instance__DOT__core_state 
         = vlSelfRef.core_state;
-    vlSelfRef.threads__BRA__1__KET____DOT__pc_instance__DOT__current_pc 
-        = vlSelfRef.current_pc;
     vlSelfRef.threads__BRA__1__KET____DOT__pc_instance__DOT__core_state 
         = vlSelfRef.core_state;
-    vlSelfRef.threads__BRA__2__KET____DOT__pc_instance__DOT__current_pc 
-        = vlSelfRef.current_pc;
     vlSelfRef.threads__BRA__2__KET____DOT__pc_instance__DOT__core_state 
         = vlSelfRef.core_state;
-    vlSelfRef.threads__BRA__3__KET____DOT__pc_instance__DOT__current_pc 
-        = vlSelfRef.current_pc;
     vlSelfRef.threads__BRA__3__KET____DOT__pc_instance__DOT__core_state 
         = vlSelfRef.core_state;
     vlSelfRef.threads__BRA__0__KET____DOT__alu_instance__DOT__core_state 
