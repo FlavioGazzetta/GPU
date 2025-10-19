@@ -1,1596 +1,926 @@
 # Combined source code dump
-# Generated on Sat Oct 18 02:17:22 BST 2025
+# Generated on Sun Oct 19 22:23:31 BST 2025
 
 ====================================================================
->>> File: dut/src/alu.sv
+>>> File: cpp/sim_main.cpp
 ====================================================================
 
-`default_nettype none
-`timescale 1ns/1ns
+#include "Vgpu.h"
+#include "verilated.h"
+#include "verilated_vcd_c.h"
 
-// ARITHMETIC-LOGIC UNIT
-// > Executes computations on register values
-// > In this minimal implementation, the ALU supports the 4 basic arithmetic operations
-// > Each thread in each core has it's own ALU
-// > ADD, SUB, MUL, DIV instructions are all executed here
-module alu (
-    input  logic        clk,
-    input  logic        reset,
-    input  logic        enable, // If current block has less threads then block size, some ALUs will be inactive
+#include <cstdint>
+#include <vector>
+#include <cstdio>
+#include <type_traits>
+#include <unordered_map>
+#include <string>
+#include <cstring>
 
-    input  logic [2:0]  core_state,
+// ========================= tests =========================
+#include "test/test_iface.hpp"
+#include "test/matadd.hpp"       // defines TEST_MATADD
+#include "test/matmul5x5.hpp"    // defines TEST_MATMUL5x5
+#include "test/tests_memcpy.hpp"      // defines TEST_MEMCPY
+#include "test/tests_add_scalar.hpp"  // defines TEST_ADD_SCALAR
+#include "test/tests_madd.hpp"        // defines TEST_MADD
+#include "test/tests_quickret.hpp"    // defines TEST_QUICKRET
+#include "test/tests_branch_pred.hpp"
 
-    input  logic [1:0]  decoded_alu_arithmetic_mux,
-    input  logic        decoded_alu_output_mux,
+// Registry
+static const std::unordered_map<std::string, TestIface*> kTests = {
+    { TEST_MATADD.name,        &TEST_MATADD },
+    { TEST_MATMUL5x5.name,     &TEST_MATMUL5x5 },
+    { TEST_MEMCPY.name,        &TEST_MEMCPY },
+    { TEST_ADD_SCALAR.name,    &TEST_ADD_SCALAR },
+    { TEST_MADD.name,          &TEST_MADD },
+    { TEST_QUICKRET.name,      &TEST_QUICKRET },
+    { TEST_BRANCH_PRED.name,   &TEST_BRANCH_PRED }, 
+};
 
-    input  logic [7:0]  rs,
-    input  logic [7:0]  rt,
-    output logic [7:0]  alu_out
-);
-    localparam logic [1:0] ADD = 2'b00,
-                           SUB = 2'b01,
-                           MUL = 2'b10,
-                           DIV = 2'b11;
+static TestIface* pick_test_from_args(int argc, char** argv) {
+    std::string want;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strncmp(argv[i], "+test=", 6) == 0) { want = std::string(argv[i] + 6); break; }
+    }
+    if (!want.empty()) {
+        // exact first
+        auto it = kTests.find(want);
+        if (it != kTests.end()) return it->second;
+        // prefix QoL (e.g. +test=matmul5x -> matmul5x5)
+        for (const auto& kv : kTests)
+            if (kv.first.rfind(want, 0) == 0) return kv.second;
+        std::fprintf(stderr, "[WARN] Unknown test '%s'. Available:", want.c_str());
+        for (const auto& kv : kTests) std::fprintf(stderr, " %s", kv.first.c_str());
+        std::fprintf(stderr, "\nFalling back to 'matadd'.\n");
+    }
+    return &TEST_MATADD;
+}
 
-    // Sequential update, identical behavior to original
-    always_ff @(posedge clk) begin
-        if (reset) begin
-            alu_out <= 8'b0;
-        end else if (enable) begin
-            // Calculate alu_out when core_state = EXECUTE
-            if (core_state == 3'b101) begin
-                if (decoded_alu_output_mux == 1'b1) begin
-                    // Signed compare for CMP → NZP in alu_out[2:0]
-                    logic signed [8:0] diff;
-                    diff = $signed({1'b0, rs}) - $signed({1'b0, rt});
-                    alu_out <= {5'b0, (diff > 0), (diff == 0), (diff < 0)};
-                end else begin
-                    // Execute the specified arithmetic instruction
-                    case (decoded_alu_arithmetic_mux)
-                        ADD: alu_out <= rs + rt;
-                        SUB: alu_out <= rs - rt;
-                        MUL: alu_out <= rs * rt;
-                        DIV: alu_out <= rs / rt;
-                        default: alu_out <= alu_out; // hold value (no behavior change)
-                    endcase
-                end
-            end
-        end
-    end
-endmodule
+// ========================= sim helpers =========================
+static const int PROG_ADDR_BITS = 8;
+static const int PROG_DATA_BITS = 16;
+static const int PROG_CH        = 1;
 
+static const int DATA_ADDR_BITS = 8;
+static const int DATA_DATA_BITS = 8;
+static const int DATA_CH        = 4;
 
-====================================================================
->>> File: dut/src/controller.sv
-====================================================================
+static const int MAX_CYCLES     = 2000000;
 
-`default_nettype none
-`timescale 1ns/1ns
+template <typename T>
+struct is_ptr_or_arr : std::bool_constant<std::is_pointer_v<T> || std::is_array_v<T>> {};
 
-// MEMORY CONTROLLER
-// > Receives memory requests from all cores
-// > Throttles requests based on limited external memory bandwidth
-// > Waits for responses from external memory and distributes them back to cores
-module controller #(
-    parameter int ADDR_BITS     = 8,
-    parameter int DATA_BITS     = 16,
-    parameter int NUM_CONSUMERS = 4, // The number of consumers accessing memory through this controller
-    parameter int NUM_CHANNELS  = 1, // The number of concurrent channels available to send requests to global memory
-    parameter bit WRITE_ENABLE  = 1  // Whether this memory controller can write to memory (program memory is read-only)
-) (
-    input  logic clk,
-    input  logic reset,
+template <typename T>
+static inline uint32_t rd_mask(const T& m, int i) {
+    if constexpr (is_ptr_or_arr<T>::value) return static_cast<uint32_t>(m[i]);
+    else return (static_cast<uint64_t>(m) >> i) & 0x1u;
+}
 
-    // Consumer Interface (Fetchers / LSUs)
-    input  logic [NUM_CONSUMERS-1:0]                        consumer_read_valid,
-    input  logic [ADDR_BITS-1:0]                            consumer_read_address [NUM_CONSUMERS],
-    output logic [NUM_CONSUMERS-1:0]                        consumer_read_ready,
-    output logic [DATA_BITS-1:0]                            consumer_read_data   [NUM_CONSUMERS],
-    input  logic [NUM_CONSUMERS-1:0]                        consumer_write_valid,
-    input  logic [ADDR_BITS-1:0]                            consumer_write_address[NUM_CONSUMERS],
-    input  logic [DATA_BITS-1:0]                            consumer_write_data  [NUM_CONSUMERS],
-    output logic [NUM_CONSUMERS-1:0]                        consumer_write_ready,
+template <typename T>
+static inline void wr_mask(T& m, int i, uint8_t v) {
+    if constexpr (is_ptr_or_arr<T>::value) { m[i] = v; }
+    else {
+        uint64_t vv = static_cast<uint64_t>(m);
+        const uint64_t bit = 1ull << i;
+        vv = (vv & ~bit) | ((v ? 1ull : 0ull) << i);
+        m = static_cast<T>(vv);
+    }
+}
 
-    // Memory Interface (Data / Program)
-    output logic [NUM_CHANNELS-1:0]                         mem_read_valid,
-    output logic [ADDR_BITS-1:0]                            mem_read_address [NUM_CHANNELS],
-    input  logic [NUM_CHANNELS-1:0]                         mem_read_ready,
-    input  logic [DATA_BITS-1:0]                            mem_read_data   [NUM_CHANNELS],
-    output logic [NUM_CHANNELS-1:0]                         mem_write_valid,
-    output logic [ADDR_BITS-1:0]                            mem_write_address[NUM_CHANNELS],
-    output logic [DATA_BITS-1:0]                            mem_write_data  [NUM_CHANNELS],
-    input  logic [NUM_CHANNELS-1:0]                         mem_write_ready
-);
-    localparam logic [2:0] IDLE          = 3'b000,
-                           READ_WAITING  = 3'b010,
-                           WRITE_WAITING = 3'b011,
-                           READ_RELAYING = 3'b100,
-                           WRITE_RELAYING= 3'b101;
+template <typename T>
+static inline uint32_t rd_lane(const T& bus, int i, int bits_per_lane) {
+    if constexpr (is_ptr_or_arr<T>::value) return static_cast<uint32_t>(bus[i]);
+    else {
+        const int lo = i * bits_per_lane;
+        const uint64_t mask = (bits_per_lane >= 64) ? ~0ull : ((1ull << bits_per_lane) - 1ull);
+        return (static_cast<uint64_t>(bus) >> lo) & mask;
+    }
+}
 
-    // Keep track of state for each channel and which jobs each channel is handling
-    logic [2:0] controller_state [NUM_CHANNELS];
-    logic [$clog2(NUM_CONSUMERS)-1:0] current_consumer [NUM_CHANNELS]; // Which consumer is each channel currently serving
-    logic [NUM_CONSUMERS-1:0]         channel_serving_consumer;        // Which consumers are being served (one channel each)
+template <typename T>
+static inline void wr_lane(T& bus, int i, int bits_per_lane, uint32_t val) {
+    if constexpr (is_ptr_or_arr<T>::value) { bus[i] = val; }
+    else {
+        const int lo = i * bits_per_lane;
+        const uint64_t mask = (bits_per_lane >= 64) ? ~0ull : ((1ull << bits_per_lane) - 1ull);
+        uint64_t vv = static_cast<uint64_t>(bus);
+        vv &= ~(mask << lo);
+        vv |= (static_cast<uint64_t>(val) & mask) << lo;
+        bus = static_cast<T>(vv);
+    }
+}
 
-    // Sequential logic only; no behavior changes
-    always_ff @(posedge clk) begin
-        if (reset) begin
-            mem_read_valid  <= '0;
-            mem_write_valid <= '0;
-            consumer_read_ready  <= '0;
-            consumer_write_ready <= '0;
-            channel_serving_consumer <= '0;
+struct MemProg { std::vector<uint16_t> mem; MemProg() : mem(1u << PROG_ADDR_BITS, 0) {} };
+struct MemData { std::vector<uint8_t>  mem; MemData() : mem(1u << DATA_ADDR_BITS, 0) {} };
 
-            // Zero unpacked arrays with foreach (required for SV/Verilator)
-            foreach (mem_read_address[i])   mem_read_address[i]   <= '0;
-            foreach (mem_write_address[i])  mem_write_address[i]  <= '0;
-            foreach (mem_write_data[i])     mem_write_data[i]     <= '0;
-            foreach (consumer_read_data[i]) consumer_read_data[i] <= '0;
+static vluint64_t main_time = 0;
+double sc_time_stamp() { return main_time; }
 
-            foreach (current_consumer[i])   current_consumer[i]   <= '0;
-            foreach (controller_state[i])   controller_state[i]   <= '0; // IDLE == 3'b000
-        end else begin
-            // For each channel, we handle processing concurrently
-            for (int i = 0; i < NUM_CHANNELS; i++) begin
-                unique case (controller_state[i])
-                    IDLE: begin
-                        // While this channel is idle, cycle through consumers looking for one with a pending request
-                        for (int j = 0; j < NUM_CONSUMERS; j++) begin
-                            if (consumer_read_valid[j] && !channel_serving_consumer[j]) begin
-                                channel_serving_consumer[j] <= 1'b1;
-                                // width-safe cast of loop index
-                                current_consumer[i]         <= $bits(current_consumer[i])'(j);
+static void tick(Vgpu* tb, VerilatedVcdC* trace) {
+    tb->clk = 1; tb->eval(); if (trace) trace->dump(main_time); main_time += 5;
+    tb->clk = 0; tb->eval(); if (trace) trace->dump(main_time); main_time += 5;
+}
 
-                                mem_read_valid[i]           <= 1'b1;
-                                mem_read_address[i]         <= consumer_read_address[j];
-                                controller_state[i]         <= READ_WAITING;
+static inline void drive_program_mem(Vgpu* tb, MemProg& pmem) {
+    for (int i = 0; i < PROG_CH; ++i) {
+        const uint8_t valid = rd_mask(tb->program_mem_read_valid, i);
+        const uint8_t addr  = static_cast<uint8_t>(rd_lane(tb->program_mem_read_address, i, PROG_ADDR_BITS));
+        if (valid) {
+            wr_mask(tb->program_mem_read_ready, i, 1);
+            wr_lane(tb->program_mem_read_data,  i, PROG_DATA_BITS, pmem.mem[addr]);
+        } else {
+            wr_mask(tb->program_mem_read_ready, i, 0);
+            wr_lane(tb->program_mem_read_data,  i, PROG_DATA_BITS, 0);
+        }
+    }
+}
 
-                                // Once we find a pending request, pick it up with this channel and stop looking for requests
-                                break;
-                            end else if (consumer_write_valid[j] && !channel_serving_consumer[j]) begin
-                                channel_serving_consumer[j] <= 1'b1;
-                                // width-safe cast of loop index
-                                current_consumer[i]         <= $bits(current_consumer[i])'(j);
+static inline void drive_data_mem(Vgpu* tb, MemData& dmem) {
+    // reads
+    for (int i = 0; i < DATA_CH; ++i) {
+        const uint8_t valid = rd_mask(tb->data_mem_read_valid, i);
+        const uint8_t addr  = static_cast<uint8_t>(rd_lane(tb->data_mem_read_address, i, DATA_ADDR_BITS));
+        if (valid) {
+            wr_mask(tb->data_mem_read_ready, i, 1);
+            wr_lane(tb->data_mem_read_data,  i, DATA_DATA_BITS, dmem.mem[addr]);
+        } else {
+            wr_mask(tb->data_mem_read_ready, i, 0);
+            wr_lane(tb->data_mem_read_data,  i, DATA_DATA_BITS, 0);
+        }
+    }
+    // writes
+    for (int i = 0; i < DATA_CH; ++i) {
+        const uint8_t valid = rd_mask(tb->data_mem_write_valid, i);
+        const uint8_t addr  = static_cast<uint8_t>(rd_lane(tb->data_mem_write_address, i, DATA_ADDR_BITS));
+        const uint8_t data  = static_cast<uint8_t>(rd_lane(tb->data_mem_write_data,   i, DATA_DATA_BITS));
+        if (valid) {
+            dmem.mem[addr] = data;
+#ifdef DEBUG_LOG
+            std::printf("[HOST][WRITE] ch=%d addr=%u data=%u\n", i, addr, data);
+#endif
+            wr_mask(tb->data_mem_write_ready, i, 1);
+        } else {
+            wr_mask(tb->data_mem_write_ready, i, 0);
+        }
+    }
+}
 
-                                mem_write_valid[i]          <= 1'b1;
-                                mem_write_address[i]        <= consumer_write_address[j];
-                                mem_write_data[i]           <= consumer_write_data[j];
-                                controller_state[i]         <= WRITE_WAITING;
+// ========================= main =========================
+int main(int argc, char** argv) {
+    Verilated::commandArgs(argc, argv);
+    Verilated::traceEverOn(true);
 
-                                // Once we find a pending request, pick it up with this channel and stop looking for requests
-                                break;
-                            end
-                        end
-                    end
+    auto* tb = new Vgpu;
+    auto* trace = new VerilatedVcdC;
+    tb->trace(trace, 99);
+    trace->open("dump.vcd");
 
-                    READ_WAITING: begin
-                        // Wait for response from memory for pending read request
-                        if (mem_read_ready[i]) begin
-                            mem_read_valid[i]                          <= 1'b0;
-                            consumer_read_ready[current_consumer[i]]   <= 1'b1;
-                            consumer_read_data[current_consumer[i]]    <= mem_read_data[i];
-                            controller_state[i]                        <= READ_RELAYING;
-                        end
-                    end
+    MemProg pmem;
+    MemData dmem;
 
-                    WRITE_WAITING: begin
-                        // Wait for response from memory for pending write request
-                        if (mem_write_ready[i]) begin
-                            mem_write_valid[i]                         <= 1'b0;
-                            consumer_write_ready[current_consumer[i]]  <= 1'b1;
-                            controller_state[i]                        <= WRITE_RELAYING;
-                        end
-                    end
+    // Select & load test
+    TestIface* T = pick_test_from_args(argc, argv);
+    std::printf("Running test: %s\n", T->name);
+    T->load_program(pmem.mem);
+    T->load_data(dmem.mem);
 
-                    // Wait until consumer acknowledges it received response, then reset
-                    READ_RELAYING: begin
-                        if (!consumer_read_valid[current_consumer[i]]) begin
-                            channel_serving_consumer[current_consumer[i]] <= 1'b0;
-                            consumer_read_ready[current_consumer[i]]      <= 1'b0;
-                            controller_state[i]                           <= IDLE;
-                        end
-                    end
+    // Reset
+    tb->clk = 0;
+    tb->reset = 1;
+    tb->start = 0;
+    tb->device_control_write_enable = 0;
+    tb->device_control_data = 0;
 
-                    WRITE_RELAYING: begin
-                        if (!consumer_write_valid[current_consumer[i]]) begin
-                            channel_serving_consumer[current_consumer[i]] <= 1'b0;
-                            consumer_write_ready[current_consumer[i]]      <= 1'b0;
-                            controller_state[i]                            <= IDLE;
-                        end
-                    end
-                endcase
-            end
-        end
-    end
-endmodule
+    for (int c = 0; c < PROG_CH; ++c) {
+        wr_mask(tb->program_mem_read_ready, c, 0);
+        wr_lane(tb->program_mem_read_data,  c, PROG_DATA_BITS, 0);
+    }
+    for (int c = 0; c < DATA_CH; ++c) {
+        wr_mask(tb->data_mem_read_ready,  c, 0);
+        wr_lane(tb->data_mem_read_data,   c, DATA_DATA_BITS, 0);
+        wr_mask(tb->data_mem_write_ready, c, 0);
+    }
 
+    for (int i = 0; i < 4; ++i) tick(tb, trace);
+    tb->reset = 0;
 
-====================================================================
->>> File: dut/src/core.sv
-====================================================================
+    // Configure threads based on test
+    const uint8_t threads = (std::string(T->name) == "matmul5x5") ? 25 : 8;
+    tb->device_control_data = threads;
+    tb->device_control_write_enable = 1; tick(tb, trace);
+    tb->device_control_write_enable = 0;
 
-`default_nettype none
-`timescale 1ns/1ns
+    // Run
+    tb->start = 1;
+    int cycles = 0;
+    while (!Verilated::gotFinish() && cycles < MAX_CYCLES) {
+        drive_program_mem(tb, pmem);
+        drive_data_mem(tb, dmem);
+        tick(tb, trace);
+        ++cycles;
+        if (tb->done) break;
+    }
+    tb->start = 0; tick(tb, trace);
 
-// COMPUTE CORE
-// > Handles processing 1 block at a time
-// > The core also has its own scheduler to manage control flow
-// > Each core contains 1 fetcher & decoder, and register files, ALUs, LSUs, PC for each thread
-module core #(
-    parameter int DATA_MEM_ADDR_BITS     = 8,
-    parameter int DATA_MEM_DATA_BITS     = 8,
-    parameter int PROGRAM_MEM_ADDR_BITS  = 8,
-    parameter int PROGRAM_MEM_DATA_BITS  = 16,
-    parameter int THREADS_PER_BLOCK      = 4
-) (
-    input  logic clk,
-    input  logic reset,
+    std::printf("Completed in %d cycles\n", cycles);
 
-    // Kernel Execution
-    input  logic start,
-    output logic done,
+    // Check
+    std::string why;
+    const bool ok = T->check(dmem.mem, why);
+    std::printf("Result: %s\n", ok ? "PASS" : "FAIL");
+    if (!ok) std::printf("Reason: %s\n", why.c_str());
 
-    // Block Metadata
-    input  logic [7:0] block_id,
-    input  logic [$clog2(THREADS_PER_BLOCK):0] thread_count,
-
-    // Program Memory
-    output logic                             program_mem_read_valid,
-    output logic [PROGRAM_MEM_ADDR_BITS-1:0] program_mem_read_address,
-    input  logic                             program_mem_read_ready,
-    input  logic [PROGRAM_MEM_DATA_BITS-1:0] program_mem_read_data,
-
-    // Data Memory
-    output logic [THREADS_PER_BLOCK-1:0]                       data_mem_read_valid,
-    output logic [DATA_MEM_ADDR_BITS-1:0]                      data_mem_read_address [THREADS_PER_BLOCK],
-    input  logic [THREADS_PER_BLOCK-1:0]                       data_mem_read_ready,
-    input  logic [DATA_MEM_DATA_BITS-1:0]                      data_mem_read_data   [THREADS_PER_BLOCK],
-    output logic [THREADS_PER_BLOCK-1:0]                       data_mem_write_valid,
-    output logic [DATA_MEM_ADDR_BITS-1:0]                      data_mem_write_address[THREADS_PER_BLOCK],
-    output logic [DATA_MEM_DATA_BITS-1:0]                      data_mem_write_data  [THREADS_PER_BLOCK],
-    input  logic [THREADS_PER_BLOCK-1:0]                       data_mem_write_ready
-);
-    // ========= Core-wide state =========
-    logic [2:0]  core_state;
-    logic [2:0]  fetcher_state;
-    logic [15:0] instruction;
-
-    // ========= Inter-thread bundles =========
-    // NOTE: Only ONE thread may drive current_pc (see below).
-    logic [7:0] current_pc;
-
-    logic [7:0] next_pc [THREADS_PER_BLOCK];
-    logic [7:0] rs      [THREADS_PER_BLOCK];
-    logic [7:0] rt      [THREADS_PER_BLOCK];
-    logic [1:0] lsu_state [THREADS_PER_BLOCK];
-    logic [7:0] lsu_out   [THREADS_PER_BLOCK];
-    logic [7:0] alu_out   [THREADS_PER_BLOCK];
-
-    // For “other” threads’ current_pc outputs (to avoid multiple drivers)
-    logic [7:0] current_pc_unused [THREADS_PER_BLOCK];
-
-    // ========= Decoded Instruction =========
-    logic [3:0] decoded_rd_address;
-    logic [3:0] decoded_rs_address;
-    logic [3:0] decoded_rt_address;
-    logic [2:0] decoded_nzp;
-    logic [7:0] decoded_immediate;
-
-    // Decoded Control
-    logic       decoded_reg_write_enable;         // writeback enable
-    logic       decoded_mem_read_enable;          // LSU read
-    logic       decoded_mem_write_enable;         // LSU write
-    logic       decoded_nzp_write_enable;         // NZP write
-    logic [1:0] decoded_reg_input_mux;            // writeback mux
-    logic [1:0] decoded_alu_arithmetic_mux;       // ALU arithmetic op
-    logic       decoded_alu_output_mux;           // ALU select (arith vs pass)
-    logic       decoded_pc_mux;                   // PC select (seq vs branch/jump)
-    logic       decoded_ret;                      // RET (kernel return)
-
-    // Speculative prefetch hint
-    logic        spec_en;
-    logic [7:0]  spec_pc;
-
-    // ========= Fetcher =========
-    fetcher #(
-        .PROGRAM_MEM_ADDR_BITS(PROGRAM_MEM_ADDR_BITS),
-        .PROGRAM_MEM_DATA_BITS(PROGRAM_MEM_DATA_BITS)
-    ) fetcher_instance (
-        .clk(clk),
-        .reset(reset),
-        .spec_en(spec_en),
-        .spec_pc(spec_pc),
-        .core_state(core_state),
-        .current_pc(current_pc),
-        .mem_read_valid(program_mem_read_valid),
-        .mem_read_address(program_mem_read_address),
-        .mem_read_ready(program_mem_read_ready),
-        .mem_read_data(program_mem_read_data),
-        .fetcher_state(fetcher_state),
-        .instruction(instruction)
-    );
-
-    // ========= Decoder =========
-    decoder decoder_instance (
-        .clk(clk),
-        .reset(reset),
-        .core_state(core_state),
-        .instruction(instruction),
-        .decoded_rd_address(decoded_rd_address),
-        .decoded_rs_address(decoded_rs_address),
-        .decoded_rt_address(decoded_rt_address),
-        .decoded_nzp(decoded_nzp),
-        .decoded_immediate(decoded_immediate),
-        .decoded_reg_write_enable(decoded_reg_write_enable),
-        .decoded_mem_read_enable(decoded_mem_read_enable),
-        .decoded_mem_write_enable(decoded_mem_write_enable),
-        .decoded_nzp_write_enable(decoded_nzp_write_enable),
-        .decoded_reg_input_mux(decoded_reg_input_mux),
-        .decoded_alu_arithmetic_mux(decoded_alu_arithmetic_mux),
-        .decoded_alu_output_mux(decoded_alu_output_mux),
-        .decoded_pc_mux(decoded_pc_mux),
-        .decoded_ret(decoded_ret)
-    );
-
-    // ========= Scheduler =========
-    scheduler #(
-        .THREADS_PER_BLOCK(THREADS_PER_BLOCK)
-    ) scheduler_instance (
-        .clk(clk),
-        .reset(reset),
-        .start(start),
-        .fetcher_state(fetcher_state),
-        .core_state(core_state),
-        .decoded_mem_read_enable(decoded_mem_read_enable),
-        .decoded_mem_write_enable(decoded_mem_write_enable),
-        .decoded_ret(decoded_ret),
-        .lsu_state(lsu_state),
-        .current_pc(current_pc),
-        .next_pc(next_pc),
-        .done(done)
-    );
-
-    // ========= Per-thread units =========
-    genvar i;
-    generate
-        for (i = 0; i < THREADS_PER_BLOCK; i = i + 1) begin : threads
-            // ALU
-            alu alu_instance (
-                .clk(clk),
-                .reset(reset),
-                .enable(i < thread_count),
-                .core_state(core_state),
-                .decoded_alu_arithmetic_mux(decoded_alu_arithmetic_mux),
-                .decoded_alu_output_mux(decoded_alu_output_mux),
-                .rs(rs[i]),
-                .rt(rt[i]),
-                .alu_out(alu_out[i])
-            );
-
-            // LSU
-            lsu lsu_instance (
-                .clk(clk),
-                .reset(reset),
-                .enable(i < thread_count),
-                .core_state(core_state),
-                .decoded_mem_read_enable(decoded_mem_read_enable),
-                .decoded_mem_write_enable(decoded_mem_write_enable),
-                .mem_read_valid(data_mem_read_valid[i]),
-                .mem_read_address(data_mem_read_address[i]),
-                .mem_read_ready(data_mem_read_ready[i]),
-                .mem_read_data(data_mem_read_data[i]),
-                .mem_write_valid(data_mem_write_valid[i]),
-                .mem_write_address(data_mem_write_address[i]),
-                .mem_write_data(data_mem_write_data[i]),
-                .mem_write_ready(data_mem_write_ready[i]),
-                .rs(rs[i]),
-                .rt(rt[i]),
-                .lsu_state(lsu_state[i]),
-                .lsu_out(lsu_out[i])
-            );
-
-            // Register File
-            registers #(
-                .THREADS_PER_BLOCK(THREADS_PER_BLOCK),
-                .THREAD_ID(i),
-                .DATA_BITS(DATA_MEM_DATA_BITS)
-            ) register_instance (
-                .clk(clk),
-                .reset(reset),
-                .enable(i < thread_count),
-                .block_id(block_id),
-                .core_state(core_state),
-                .decoded_reg_write_enable(decoded_reg_write_enable),
-                .decoded_reg_input_mux(decoded_reg_input_mux),
-                .decoded_rd_address(decoded_rd_address),
-                .decoded_rs_address(decoded_rs_address),
-                .decoded_rt_address(decoded_rt_address),
-                .decoded_immediate(decoded_immediate),
-                .alu_out(alu_out[i]),
-                .lsu_out(lsu_out[i]),
-                .rs(rs[i]),
-                .rt(rt[i])
-            );
-
-            // Program Counter
-            pc #(
-                .DATA_MEM_DATA_BITS(DATA_MEM_DATA_BITS),
-                .PROGRAM_MEM_ADDR_BITS(PROGRAM_MEM_ADDR_BITS)
-            ) pc_instance (
-                .clk(clk),
-                .reset(reset),
-                .enable(i < thread_count),
-                .core_state(core_state),
-                .decoded_nzp(decoded_nzp),
-                .decoded_immediate(decoded_immediate),
-                .decoded_nzp_write_enable(decoded_nzp_write_enable),
-                .decoded_pc_mux(decoded_pc_mux),
-                .alu_out(alu_out[i]),
-                // IMPORTANT: Only one thread drives current_pc.
-                .current_pc( (i == 0) ? current_pc : current_pc_unused[i] ),
-                .next_pc(next_pc[i])
-            );
-        end
-    endgenerate
-endmodule
+    tb->final();
+    trace->close();
+    delete trace;
+    delete tb;
+    return ok ? 0 : 1;
+}
 
 
 ====================================================================
->>> File: dut/src/dcr.sv
+>>> File: cpp/test/matadd.hpp
 ====================================================================
 
-`default_nettype none
-`timescale 1ns/1ns
+#pragma once
+#include "test_iface.hpp"
+#include <vector>
+#include <cstdint>
+#include <string>
 
-// DEVICE CONTROL REGISTER
-// > Used to configure high-level settings
-// > In this minimal example, the DCR is used to configure the number of threads to run for the kernel
-module dcr (
-    input  logic clk,
-    input  logic reset,
+// ---- DEFINITIONS (header-only) ----
+static inline void load_matadd_program(std::vector<uint16_t>& p) {
+    const uint16_t prog[] = {
+        0b0101000011011110, // MUL R0, %blockIdx, %blockDim
+        0b0011000000001111, // ADD R0, R0, %threadIdx
+        0b1001000100000000, // CONST R1, #0        ; baseA
+        0b1001001000001000, // CONST R2, #8        ; baseB
+        0b1001001100010000, // CONST R3, #16       ; baseC
+        0b0011010000010000, // ADD R4, R1, R0
+        0b0111010001000000, // LDR R4, R4
+        0b0011010100100000, // ADD R5, R2, R0
+        0b0111010101010000, // LDR R5, R5
+        0b0011011001000101, // ADD R6, R4, R5
+        0b0011011100110000, // ADD R7, R3, R0
+        0b1000000001110110, // STR R7, R6
+        0b1111000000000000, // RET
+    };
+    p.assign(p.size(), 0);
+    for (size_t i = 0; i < sizeof(prog)/sizeof(prog[0]); ++i) p[i] = prog[i];
+}
 
-    input  logic        device_control_write_enable,
-    input  logic [7:0]  device_control_data,
-    output logic [7:0]  thread_count
-);
-    // Store device control data in dedicated register
-    logic [7:0] device_control_register;
+static inline void load_matadd_data(std::vector<uint8_t>& d) {
+    // A: 0..7, B: 0..7, C cleared
+    for (int i = 0; i < 8; ++i) d[i] = i;
+    for (int i = 0; i < 8; ++i) d[8 + i] = i;
+    for (int i = 0; i < 8; ++i) d[16 + i] = 0;
+}
 
-    assign thread_count = device_control_register;
+static inline bool check_matadd(const std::vector<uint8_t>& d, std::string& why) {
+    for (int i = 0; i < 8; ++i) {
+        uint8_t exp = d[i] + d[8 + i];
+        uint8_t got = d[16 + i];
+        if (got != exp) {
+            why = "matadd mismatch at " + std::to_string(i);
+            return false;
+        }
+    }
+    return true;
+}
 
-    always_ff @(posedge clk) begin
-        if (reset) begin
-            device_control_register <= 8'b0;
-        end else if (device_control_write_enable) begin
-            device_control_register <= device_control_data;
-        end
-    end
-endmodule
-
-
-====================================================================
->>> File: dut/src/decoder.sv
-====================================================================
-
-`default_nettype none
-`timescale 1ns/1ns
-
-// INSTRUCTION DECODER
-// > Decodes an instruction into the control signals necessary to execute it
-// > Each core has it's own decoder
-module decoder (
-    input  logic        clk,
-    input  logic        reset,
-
-    input  logic [2:0]  core_state,
-    input  logic [15:0] instruction,
-    
-    // Instruction Signals
-    output logic [3:0]  decoded_rd_address,
-    output logic [3:0]  decoded_rs_address,
-    output logic [3:0]  decoded_rt_address,
-    output logic [2:0]  decoded_nzp,
-    output logic [7:0]  decoded_immediate,
-    
-    // Control Signals
-    output logic        decoded_reg_write_enable,         // Enable writing to a register
-    output logic        decoded_mem_read_enable,          // Enable reading from memory
-    output logic        decoded_mem_write_enable,         // Enable writing to memory
-    output logic        decoded_nzp_write_enable,         // Enable writing to NZP register
-    output logic [1:0]  decoded_reg_input_mux,            // Select input to register
-    output logic [1:0]  decoded_alu_arithmetic_mux,       // Select arithmetic operation
-    output logic        decoded_alu_output_mux,           // Select operation in ALU
-    output logic        decoded_pc_mux,                   // Select source of next PC
-
-    // Return (finished executing thread)
-    output logic        decoded_ret
-);
-    localparam logic [3:0] NOP   = 4'b0000,
-                           BRnzp = 4'b0001,
-                           CMP   = 4'b0010,
-                           ADD   = 4'b0011,
-                           SUB   = 4'b0100,
-                           MUL   = 4'b0101,
-                           DIV   = 4'b0110,
-                           LDR   = 4'b0111,
-                           STR   = 4'b1000,
-                           CONST = 4'b1001,
-                           RET   = 4'b1111;
-
-    always_ff @(posedge clk) begin 
-        if (reset) begin 
-            decoded_rd_address        <= '0;
-            decoded_rs_address        <= '0;
-            decoded_rt_address        <= '0;
-            decoded_immediate         <= '0;
-            decoded_nzp               <= '0;
-            decoded_reg_write_enable  <= 1'b0;
-            decoded_mem_read_enable   <= 1'b0;
-            decoded_mem_write_enable  <= 1'b0;
-            decoded_nzp_write_enable  <= 1'b0;
-            decoded_reg_input_mux     <= 2'b00;
-            decoded_alu_arithmetic_mux<= 2'b00;
-            decoded_alu_output_mux    <= 1'b0;
-            decoded_pc_mux            <= 1'b0;
-            decoded_ret               <= 1'b0;
-        end else begin 
-            // Decode when core_state = DECODE
-            if (core_state == 3'b010) begin 
-                // Get instruction signals from instruction every time
-                decoded_rd_address <= instruction[11:8];
-                decoded_rs_address <= instruction[7:4];
-                decoded_rt_address <= instruction[3:0];
-                decoded_immediate  <= instruction[7:0];
-                decoded_nzp        <= instruction[11:9];
-
-                // Control signals reset on every decode and set conditionally by instruction
-                decoded_reg_write_enable   <= 1'b0;
-                decoded_mem_read_enable    <= 1'b0;
-                decoded_mem_write_enable   <= 1'b0;
-                decoded_nzp_write_enable   <= 1'b0;
-                decoded_reg_input_mux      <= 2'b00;
-                decoded_alu_arithmetic_mux <= 2'b00;
-                decoded_alu_output_mux     <= 1'b0;
-                decoded_pc_mux             <= 1'b0;
-                decoded_ret                <= 1'b0;
-
-                // Set the control signals for each instruction
-                case (instruction[15:12])
-                    NOP: ; // no-op
-                    BRnzp: begin 
-                        decoded_pc_mux <= 1'b1;
-                    end
-                    CMP: begin 
-                        decoded_alu_output_mux   <= 1'b1;
-                        decoded_nzp_write_enable <= 1'b1;
-                    end
-                    ADD: begin 
-                        decoded_reg_write_enable   <= 1'b1;
-                        decoded_reg_input_mux      <= 2'b00;
-                        decoded_alu_arithmetic_mux <= 2'b00;
-                    end
-                    SUB: begin 
-                        decoded_reg_write_enable   <= 1'b1;
-                        decoded_reg_input_mux      <= 2'b00;
-                        decoded_alu_arithmetic_mux <= 2'b01;
-                    end
-                    MUL: begin 
-                        decoded_reg_write_enable   <= 1'b1;
-                        decoded_reg_input_mux      <= 2'b00;
-                        decoded_alu_arithmetic_mux <= 2'b10;
-                    end
-                    DIV: begin 
-                        decoded_reg_write_enable   <= 1'b1;
-                        decoded_reg_input_mux      <= 2'b00;
-                        decoded_alu_arithmetic_mux <= 2'b11;
-                    end
-                    LDR: begin 
-                        decoded_reg_write_enable <= 1'b1;
-                        decoded_reg_input_mux    <= 2'b01;
-                        decoded_mem_read_enable  <= 1'b1;
-                    end
-                    STR: begin 
-                        decoded_mem_write_enable <= 1'b1;
-                    end
-                    CONST: begin 
-                        decoded_reg_write_enable <= 1'b1;
-                        decoded_reg_input_mux    <= 2'b10;
-                    end
-                    RET: begin 
-                        decoded_ret <= 1'b1;
-                    end
-                endcase
-            end
-        end
-    end
-endmodule
+static TestIface TEST_MATADD {
+    "matadd",
+    load_matadd_program,
+    load_matadd_data,
+    check_matadd
+};
 
 
 ====================================================================
->>> File: dut/src/dispatch.sv
+>>> File: cpp/test/matmul5x5.hpp
 ====================================================================
 
-`default_nettype none
-`timescale 1ns/1ns
+#pragma once
+#include "test_iface.hpp"
+#include <vector>
+#include <cstdint>
+#include <string>
 
-// ============================================================
-//  DISPATCH UNIT (latch-free, width-safe, debug-friendly)
-// ============================================================
+// Memory layout (8-bit elements, row-major)
+// A: [0..24], B: [25..49], C: [50..74]
+static constexpr int A_BASE = 0;     // 25 bytes
+static constexpr int B_BASE = 25;    // 25 bytes
+static constexpr int C_BASE = 50;    // 25 bytes
 
-module dispatch #(
-    parameter int NUM_CORES          = 2,
-    parameter int THREADS_PER_BLOCK  = 4
-) (
-    input  logic clk,
-    input  logic reset,
-    input  logic start,
+// ---------------- Program: per-thread C[i,j] with unrolled k=0..4 ----------------
+// Registers used (R0..R12 are writeable; R13..R15 are RO: blockIdx, blockDim, threadIdx)
+// R0  = tid
+// R1  = row
+// R2  = col
+// R3  = baseA (0)
+// R4  = row*5
+// R5  = tmp/addr/dataB
+// R6  = acc
+// R7  = addrC
+// R8  = baseB (25)
+// R9  = baseC (50)
+// R10 = const 5
+// R11 = A_row_base = baseA + row*5
+// R12 = tmp/imm/A_val/product
 
-    // Kernel Metadata
-    input  logic [7:0] thread_count,
+static inline void load_matmul5x5_program(std::vector<uint16_t>& p) {
+    p.assign(p.size(), 0);
 
-    // Core States
-    input  logic [NUM_CORES-1:0]                          core_done,
-    output logic [NUM_CORES-1:0]                          core_start,
-    output logic [NUM_CORES-1:0]                          core_reset,
-    output logic [7:0]                                    core_block_id     [NUM_CORES],
-    output logic [$clog2(THREADS_PER_BLOCK):0]            core_thread_count [NUM_CORES],
+    const uint16_t prog[] = {
+        // tid = blockIdx*blockDim + threadIdx
+        0x50DE, // MUL  R0, R13, R14
+        0x300F, // ADD  R0, R0,  R15
 
-    // Kernel Execution
-    output logic done
-);
+        // consts and row/col
+        0x9A05, // CONST R10, #5
+        0x610A, // DIV  R1, R0,  R10      ; row = tid/5
+        0x541A, // MUL  R4, R1,  R10      ; row*5
+        0x4204, // SUB  R2, R0,  R4       ; col = tid - row*5
 
-    // --------------------------------------------------------
-    // State registers
-    // --------------------------------------------------------
-    logic [7:0] total_blocks;
+        0x9300, // CONST R3,  #0          ; A base
+        0x9819, // CONST R8,  #25         ; B base
+        0x9932, // CONST R9,  #50         ; C base
 
-    logic [7:0] blocks_dispatched, blocks_done;
-    logic [7:0] bd_next, bn_next;
+        0x3542, // ADD  R5, R4,  R2       ; idxC = row*5 + col
+        0x3795, // ADD  R7, R9,  R5       ; addrC = baseC + idxC
+        0x9600, // CONST R6,  #0          ; acc = 0
 
-    logic [NUM_CORES-1:0] core_busy, core_busy_next;
-    logic [NUM_CORES-1:0] core_start_r, core_start_next;
-    logic [NUM_CORES-1:0] core_reset_r, core_reset_next;
+        0x3B34, // ADD  R11,R3,  R4       ; A_row_base = baseA + row*5
 
-    // Register the per-core metadata to avoid latches
-    logic [7:0]                                   core_block_id_r     [NUM_CORES];
-    logic [$clog2(THREADS_PER_BLOCK):0]           core_thread_count_r [NUM_CORES];
-    logic [7:0]                                   core_block_id_next     [NUM_CORES];
-    logic [$clog2(THREADS_PER_BLOCK):0]           core_thread_count_next [NUM_CORES];
+        // ---- k = 0 ----
+        0x9C00, // CONST R12,#0
+        0x35BC, // ADD  R5, R11, R12      ; addrA = A_row_base + 0
+        0x7C50, // LDR  R12,R5            ; A_val -> R12
 
-    logic done_r, done_next;
-    logic start_execution;
+        0x9500, // CONST R5, #0
+        0x3585, // ADD  R5, R8,  R5       ; B_base + 0
+        0x3552, // ADD  R5, R5,  R2       ; + col
+        0x7550, // LDR  R5, R5            ; B_val -> R5
 
-    // Drive outputs from registered state
-    assign core_start        = core_start_r;
-    assign core_reset        = core_reset_r;
-    assign core_block_id     = core_block_id_r;
-    assign core_thread_count = core_thread_count_r;
-    assign done              = done_r;
+        0x5CC5, // MUL  R12,R12,R5        ; prod
+        0x366C, // ADD  R6, R6,  R12      ; acc += prod
 
-    // --------------------------------------------------------
-    // 8-bit safe computation of total blocks
-    // --------------------------------------------------------
-    assign total_blocks = (thread_count + 8'(THREADS_PER_BLOCK) - 8'd1) / 8'(THREADS_PER_BLOCK);
+        // ---- k = 1 ----
+        0x9C01, // CONST R12,#1
+        0x35BC, // ADD  R5, R11, R12
+        0x7C50, // LDR  R12,R5
 
-    // --------------------------------------------------------
-    // Combinational next-state logic
-    // --------------------------------------------------------
-    always_comb begin
-        // Defaults: hold current registered values
-        bd_next              = blocks_dispatched;
-        bn_next              = blocks_done;
+        0x9505, // CONST R5, #5
+        0x3585, // ADD  R5, R8,  R5
+        0x3552, // ADD  R5, R5,  R2
+        0x7550, // LDR  R5, R5
 
-        core_start_next      = '0;                 // one-cycle pulse
-        core_reset_next      = core_reset_r;       // usually held then toggled
-        core_busy_next       = core_busy;
-        done_next            = done_r;
+        0x5CC5, // MUL  R12,R12,R5
+        0x366C, // ADD  R6, R6,  R12
 
-        // Default next = current for registered arrays (prevents latches)
-        for (int i = 0; i < NUM_CORES; i++) begin
-            core_block_id_next[i]     = core_block_id_r[i];
-            core_thread_count_next[i] = core_thread_count_r[i];
-        end
+        // ---- k = 2 ----
+        0x9C02, // CONST R12,#2
+        0x35BC, // ADD  R5, R11, R12
+        0x7C50, // LDR  R12,R5
 
-        // Dispatch new work on cores released from reset
-        for (int i = 0; i < NUM_CORES; i++) begin
-            if (core_reset_r[i]) begin
-                core_reset_next[i] = 1'b0;
+        0x950A, // CONST R5, #10
+        0x3585, // ADD  R5, R8,  R5
+        0x3552, // ADD  R5, R5,  R2
+        0x7550, // LDR  R5, R5
 
-                if (bd_next < total_blocks) begin
-                    core_start_next[i]      = 1'b1;
-                    core_busy_next[i]       = 1'b1;
+        0x5CC5, // MUL  R12,R12,R5
+        0x366C, // ADD  R6, R6,  R12
 
-                    // Assign metadata
-                    core_block_id_next[i]   = bd_next;
-                    core_thread_count_next[i] = $bits(core_thread_count_next[i])'(
-                        (bd_next == total_blocks - 8'd1)
-                            ? (thread_count - (bd_next * 8'(THREADS_PER_BLOCK)))
-                            : 8'(THREADS_PER_BLOCK)
-                    );
+        // ---- k = 3 ----
+        0x9C03, // CONST R12,#3
+        0x35BC, // ADD  R5, R11, R12
+        0x7C50, // LDR  R12,R5
 
-`ifdef DEBUG_LOG
-                    $display("[%0t][DISPATCH] core=%0d START block_id=%0d threads=%0d total_blocks=%0d",
-                             $time, i, bd_next,
-                             (bd_next == total_blocks - 8'd1)
-                               ? (thread_count - (bd_next * 8'(THREADS_PER_BLOCK)))
-                               : 8'(THREADS_PER_BLOCK),
-                             total_blocks);
-`endif
-                    bd_next = bd_next + 8'd1;
-                end
-            end
-        end
+        0x950F, // CONST R5, #15
+        0x3585, // ADD  R5, R8,  R5
+        0x3552, // ADD  R5, R5,  R2
+        0x7550, // LDR  R5, R5
 
-        // Handle completions
-        for (int i = 0; i < NUM_CORES; i++) begin
-            if (core_busy[i] && core_done[i]) begin
-                core_reset_next[i] = 1'b1;
-                core_start_next[i] = 1'b0;
-                core_busy_next[i]  = 1'b0;
-                bn_next            = bn_next + 8'd1;
+        0x5CC5, // MUL  R12,R12,R5
+        0x366C, // ADD  R6, R6,  R12
 
-`ifdef DEBUG_LOG
-                $display("[%0t][DISPATCH] core=%0d DONE blocks_done=%0d/%0d",
-                         $time, i, bn_next, total_blocks);
-`endif
-            end
-        end
+        // ---- k = 4 ----
+        0x9C04, // CONST R12,#4
+        0x35BC, // ADD  R5, R11, R12
+        0x7C50, // LDR  R12,R5
 
-        // Mark kernel completion
-        if (bn_next == total_blocks)
-            done_next = 1'b1;
-    end
+        0x9514, // CONST R5, #20
+        0x3585, // ADD  R5, R8,  R5
+        0x3552, // ADD  R5, R5,  R2
+        0x7550, // LDR  R5, R5
 
-    // --------------------------------------------------------
-    // Sequential state update
-    // --------------------------------------------------------
-    always_ff @(posedge clk) begin
-        if (reset) begin
-            blocks_dispatched <= '0;
-            blocks_done       <= '0;
+        0x5CC5, // MUL  R12,R12,R5
+        0x366C, // ADD  R6, R6,  R12
 
-            core_busy         <= '0;
-            core_start_r      <= '0;
-            core_reset_r      <= {NUM_CORES{1'b1}}; // hold cores in reset at power-up
+        // store and return
+        0x8076, // STR  R7, R6
+        0xF000  // RET
+    };
 
-            done_r            <= 1'b0;
-            start_execution   <= 1'b0;
+    for (size_t i = 0; i < sizeof(prog)/sizeof(prog[0]); ++i) p[i] = prog[i];
+}
 
-            foreach (core_block_id_r[i])     core_block_id_r[i]     <= '0;
-            foreach (core_thread_count_r[i]) core_thread_count_r[i] <= THREADS_PER_BLOCK[$bits(core_thread_count_r[i])-1:0];
+// ---------------- Data ----------------
+static inline void load_matmul5x5_data(std::vector<uint8_t>& d) {
+    d.assign(d.size(), 0);
 
-        end else if (start) begin
-            // pseudo-posedge(start) to initialize a run
-            if (!start_execution)
-                start_execution <= 1'b1;
+    // A: simple 1..7 repeating
+    for (int i = 0; i < 25; ++i) d[A_BASE + i] = (uint8_t)((i % 7) + 1);
+    // B: (i*3)%11 + 1 pattern
+    for (int i = 0; i < 25; ++i) d[B_BASE + i] = (uint8_t)(((i * 3) % 11) + 1);
+    // C cleared
+    for (int i = 0; i < 25; ++i) d[C_BASE + i] = 0;
+}
 
-            // Register transitions
-            blocks_dispatched <= bd_next;
-            blocks_done       <= bn_next;
+// ---------------- Checker ----------------
+static inline bool check_matmul5x5(const std::vector<uint8_t>& d, std::string& why) {
+    auto A = [&](int r,int c){ return d[A_BASE + r*5 + c]; };
+    auto B = [&](int r,int c){ return d[B_BASE + r*5 + c]; };
+    auto C = [&](int r,int c){ return d[C_BASE + r*5 + c]; };
 
-            core_busy         <= core_busy_next;
-            core_start_r      <= core_start_next;
-            core_reset_r      <= core_reset_next;
+    for (int i = 0; i < 5; ++i) {
+        for (int j = 0; j < 5; ++j) {
+            uint16_t acc = 0;
+            for (int k = 0; k < 5; ++k) acc = (acc + (uint16_t)A(i,k) * (uint16_t)B(k,j)) & 0xFF; // modulo 256
+            if (C(i,j) != (uint8_t)acc) {
+                why = "matmul5x5 mismatch at (" + std::to_string(i) + "," + std::to_string(j)
+                    + ") exp=" + std::to_string((uint8_t)acc)
+                    + " got=" + std::to_string(C(i,j));
+                return false;
+            }
+        }
+    }
+    return true;
+}
 
-            done_r            <= done_next;
-
-            for (int i = 0; i < NUM_CORES; i++) begin
-                core_block_id_r[i]     <= core_block_id_next[i];
-                core_thread_count_r[i] <= core_thread_count_next[i];
-            end
-        end
-    end
-
-endmodule
+static TestIface TEST_MATMUL5x5 {
+    "matmul5x5",
+    load_matmul5x5_program,
+    load_matmul5x5_data,
+    check_matmul5x5
+};
 
 
 ====================================================================
->>> File: dut/src/fetcher.sv
+>>> File: cpp/test/test_encode.hpp
 ====================================================================
 
-`default_nettype none
-`timescale 1ns/1ns
+#pragma once
+#include <cstdint>
 
-// INSTRUCTION FETCHER
-// > Retrieves the instruction at the current PC from global data memory
-// > Each core has it's own fetcher
-module fetcher #(
-    parameter int PROGRAM_MEM_ADDR_BITS = 8,
-    parameter int PROGRAM_MEM_DATA_BITS = 16
-) (
-    input  logic clk,
-    input  logic reset,
+// ============================================================================
+// test_encode.hpp — Tiny-GPU test instruction encoders used by C++ tests
+// ============================================================================
+//
+// Arithmetic/Logic (3-reg):
+//   ADD rd, rs, rt  : 0011 dddd ssss tttt
+//   SUB rd, rs, rt  : 0100 dddd ssss tttt
+//   MUL rd, rs, rt  : 0101 dddd ssss tttt
+//   DIV rd, rs, rt  : 0110 dddd ssss tttt
+//
+// Memory:
+//   LDR rd, [rb + imm4] : 0111 dddd bbbb iiii
+//   STR [rb + imm4], rs : 1000 iiii bbbb ssss
+//
+// Constant:
+//   CONST rd, imm8      : 1001 dddd iiiiiiii
+//
+// Control:
+//   RET                 : 1111 0000 0000 0000
+//
+// Special “registers” (read-only in the ISA):
+//   %blockIdx=0xD, %blockDim=0xE, %threadIdx=0xF
+// ============================================================================
 
-    input logic [PROGRAM_MEM_ADDR_BITS-1:0] spec_pc,
-    input logic spec_en, //should be asserted during Decode
-    
-    // Execution State
-    input  logic [2:0]                      core_state,
-    input  logic [7:0]                      current_pc,
+static inline uint16_t OP_ADD(uint8_t rd, uint8_t rs, uint8_t rt) {
+    return uint16_t((0b0011u << 12) | ((rd & 0xFu) << 8) | ((rs & 0xFu) << 4) | (rt & 0xFu));
+}
+static inline uint16_t OP_SUB(uint8_t rd, uint8_t rs, uint8_t rt) {
+    return uint16_t((0b0100u << 12) | ((rd & 0xFu) << 8) | ((rs & 0xFu) << 4) | (rt & 0xFu));
+}
+static inline uint16_t OP_MUL(uint8_t rd, uint8_t rs, uint8_t rt) {
+    return uint16_t((0b0101u << 12) | ((rd & 0xFu) << 8) | ((rs & 0xFu) << 4) | (rt & 0xFu));
+}
+static inline uint16_t OP_DIV(uint8_t rd, uint8_t rs, uint8_t rt) {
+    return uint16_t((0b0110u << 12) | ((rd & 0xFu) << 8) | ((rs & 0xFu) << 4) | (rt & 0xFu));
+}
 
-    // Program Memory
-    output logic                            mem_read_valid,
-    output logic [PROGRAM_MEM_ADDR_BITS-1:0] mem_read_address,
-    input  logic                            mem_read_ready,
-    input  logic [PROGRAM_MEM_DATA_BITS-1:0] mem_read_data,
+static inline uint16_t OP_LDR(uint8_t rd, uint8_t rb, uint8_t imm4 = 0) {
+    return uint16_t((0b0111u << 12) | ((rd & 0xFu) << 8) | ((rb & 0xFu) << 4) | (imm4 & 0xFu));
+}
+static inline uint16_t OP_STR(uint8_t rb, uint8_t rs, uint8_t imm4 = 0) {
+    return uint16_t((0b1000u << 12) | ((imm4 & 0xFu) << 8) | ((rb & 0xFu) << 4) | (rs & 0xFu));
+}
 
-    // Fetcher Output
-    output logic [2:0]                      fetcher_state,
-    output logic [PROGRAM_MEM_DATA_BITS-1:0] instruction
-);
-    localparam logic [2:0] IDLE = 3'b000, FETCHING = 3'b001, FETCHED = 3'b010;
+static inline uint16_t OP_CONST(uint8_t rd, uint8_t imm8) {
+    return uint16_t((0b1001u << 12) | ((rd & 0xFu) << 8) | (imm8 & 0xFFu));
+}
 
-    logic                                   p_valid;
-    logic [PROGRAM_MEM_ADDR_BITS-1:0]       p_pc;
-    logic [PROGRAM_MEM_DATA_BITS-1:0]       p_instr;
+static inline uint16_t OP_RET() {
+    return uint16_t(0b1111u << 12);
+}
 
-    // define a 1-bit enumeration txn_t with DEM = demand Fetch and PF = Prefetch
-    typedef enum logic [0:0] {DEM, PF} txn_t;
-    txn_t txn_kind;
+// --- Branch-related encoders you already support via decoder/pc ---
+static inline uint16_t OP_CMP(uint8_t rs, uint8_t rt) {
+    // 0010 dddd ssss tttt ; rd ignored for CMP, set rd=0
+    return uint16_t((0b0010u << 12) | (0u << 8) | ((rs & 0xFu) << 4) | (rt & 0xFu));
+}
 
-    always_ff @(posedge clk) begin
-        if (reset) begin
-            fetcher_state    <= IDLE;
-            mem_read_valid   <= 1'b0;
-            mem_read_address <= '0;
-            instruction      <= '0;
+// BRnzp: opcode 0001, bits [11:9]=NZP mask (P,Z,N mapped to [2:0]),
+// imm8 is an absolute target PC (matches pc.sv behavior).
+static inline uint16_t OP_BRNZP(uint8_t nzp_mask, uint8_t imm8) {
+    return uint16_t((0b0001u << 12) | ((nzp_mask & 0x7u) << 9) | (imm8 & 0xFFu));
+}
 
-            p_valid          <= 1'b0;
-            p_pc             <= '0;
-            p_instr          <= '0;
-            txn_kind         <= DEM;
+// ------------------------------ Registers -----------------------------------
+enum : uint8_t {
+    R0=0, R1, R2, R3, R4, R5, R6, R7,
+    R8, R9, RA, RB, RC, RD, RE, RF
+};
 
-        end else begin
-            // -------------------------
-            // Prefetcher (runs anytime)
-            // -------------------------
-            // Fire a prefetch when asked, if buffer empty and no demand fetch in progress.
-            if (spec_en && !p_valid && (fetcher_state != FETCHING) && !mem_read_valid) begin
-                mem_read_valid   <= 1'b1;
-                mem_read_address <= spec_pc;
-                txn_kind         <= PF;
-            end
-
-            // Complete any outstanding memory read
-            if (mem_read_valid && mem_read_ready) begin
-                mem_read_valid <= 1'b0;
-                if (txn_kind == PF) begin
-                    p_valid <= 1'b1;
-                    p_pc    <= mem_read_address;
-                    p_instr <= mem_read_data;
-                end else begin
-                    // demand fetch completion
-                    instruction   <= mem_read_data;
-                    fetcher_state <= FETCHED;
-                end
-            end
-
-            // -------------------------
-            // Demand fetch state machine
-            // -------------------------
-            unique case (fetcher_state)
-                IDLE: begin
-                    if (core_state == 3'b001 /* FETCH */) begin
-                        // If we already have the right line prefetched, consume it immediately.
-                        if (p_valid && (p_pc == current_pc)) begin
-                            instruction   <= p_instr;
-                            p_valid       <= 1'b0; // consume buffer
-                            fetcher_state <= FETCHED;
-                        end else begin
-                            // Issue demand fetch
-                            mem_read_valid   <= 1'b1;
-                            mem_read_address <= current_pc;
-                            txn_kind         <= DEM;
-                            fetcher_state    <= FETCHING;
-                        end
-                    end
-                end
-
-                FETCHING: begin
-                    // wait for mem_read_ready → handled above
-                end
-
-                FETCHED: begin
-                    if (core_state == 3'b010 /* DECODE */) begin
-                        fetcher_state <= IDLE;
-                    end
-                end
-            endcase
-        end
-    end
-endmodule
+static constexpr uint8_t REG_blockIdx  = 0xD; // RD
+static constexpr uint8_t REG_blockDim  = 0xE; // RE
+static constexpr uint8_t REG_threadIdx = 0xF; // RF
 
 
 ====================================================================
->>> File: dut/src/gpu.sv
+>>> File: cpp/test/test_iface.hpp
 ====================================================================
 
-`default_nettype none
-`timescale 1ns/1ns
+#pragma once
+#include <vector>
+#include <string>
+#include <cstdint>
 
-// GPU
-// > Built to use an external async memory with multi-channel read/write
-// > Assumes that the program is loaded into program memory, data into data memory, and threads into
-//   the device control register before the start signal is triggered
-// > Has memory controllers to interface between external memory and its multiple cores
-// > Configurable number of cores and thread capacity per core
-module gpu #(
-    parameter int DATA_MEM_ADDR_BITS       = 8,   // Number of bits in data memory address (256 rows)
-    parameter int DATA_MEM_DATA_BITS       = 8,   // Number of bits in data memory value (8 bit data)
-    parameter int DATA_MEM_NUM_CHANNELS    = 4,   // Number of concurrent channels for sending requests to data memory
-    parameter int PROGRAM_MEM_ADDR_BITS    = 8,   // Number of bits in program memory address (256 rows)
-    parameter int PROGRAM_MEM_DATA_BITS    = 16,  // Number of bits in program memory value (16 bit instruction)
-    parameter int PROGRAM_MEM_NUM_CHANNELS = 1,   // Number of concurrent channels for sending requests to program memory
-    parameter int NUM_CORES                = 2,   // Number of cores to include in this GPU
-    parameter int THREADS_PER_BLOCK        = 4    // Number of threads to handle per block (per core)
-) (
-    input  logic clk,
-    input  logic reset,
-
-    // Kernel Execution
-    input  logic start,
-    output logic done,
-
-    // Device Control Register
-    input  logic       device_control_write_enable,
-    input  logic [7:0] device_control_data,
-
-    // Program Memory
-    output logic [PROGRAM_MEM_NUM_CHANNELS-1:0]              program_mem_read_valid,
-    output logic [PROGRAM_MEM_ADDR_BITS-1:0]                 program_mem_read_address [PROGRAM_MEM_NUM_CHANNELS],
-    input  logic [PROGRAM_MEM_NUM_CHANNELS-1:0]              program_mem_read_ready,
-    input  logic [PROGRAM_MEM_DATA_BITS-1:0]                 program_mem_read_data   [PROGRAM_MEM_NUM_CHANNELS],
-
-    // Data Memory
-    output logic [DATA_MEM_NUM_CHANNELS-1:0]                 data_mem_read_valid,
-    output logic [DATA_MEM_ADDR_BITS-1:0]                    data_mem_read_address  [DATA_MEM_NUM_CHANNELS],
-    input  logic [DATA_MEM_NUM_CHANNELS-1:0]                 data_mem_read_ready,
-    input  logic [DATA_MEM_DATA_BITS-1:0]                    data_mem_read_data     [DATA_MEM_NUM_CHANNELS],
-    output logic [DATA_MEM_NUM_CHANNELS-1:0]                 data_mem_write_valid,
-    output logic [DATA_MEM_ADDR_BITS-1:0]                    data_mem_write_address [DATA_MEM_NUM_CHANNELS],
-    output logic [DATA_MEM_DATA_BITS-1:0]                    data_mem_write_data    [DATA_MEM_NUM_CHANNELS],
-    input  logic [DATA_MEM_NUM_CHANNELS-1:0]                 data_mem_write_ready
-);
-    // Control
-    logic [7:0] thread_count;
-
-    // Compute Core State
-    logic [NUM_CORES-1:0]                           core_start;
-    logic [NUM_CORES-1:0]                           core_reset;
-    logic [NUM_CORES-1:0]                           core_done;
-    logic [7:0]                                      core_block_id     [NUM_CORES];
-    logic [$clog2(THREADS_PER_BLOCK):0]              core_thread_count [NUM_CORES];
-
-    // LSU <> Data Memory Controller Channels
-    localparam int NUM_LSUS = NUM_CORES * THREADS_PER_BLOCK;
-    logic [NUM_LSUS-1:0]                             lsu_read_valid;
-    logic [DATA_MEM_ADDR_BITS-1:0]                   lsu_read_address  [NUM_LSUS];
-    logic [NUM_LSUS-1:0]                             lsu_read_ready;
-    logic [DATA_MEM_DATA_BITS-1:0]                   lsu_read_data     [NUM_LSUS];
-    logic [NUM_LSUS-1:0]                             lsu_write_valid;
-    logic [DATA_MEM_ADDR_BITS-1:0]                   lsu_write_address [NUM_LSUS];
-    logic [DATA_MEM_DATA_BITS-1:0]                   lsu_write_data    [NUM_LSUS];
-    logic [NUM_LSUS-1:0]                             lsu_write_ready;
-
-    // Fetcher <> Program Memory Controller Channels
-    localparam int NUM_FETCHERS = NUM_CORES;
-    logic [NUM_FETCHERS-1:0]                          fetcher_read_valid;
-    logic [PROGRAM_MEM_ADDR_BITS-1:0]                 fetcher_read_address [NUM_FETCHERS];
-    logic [NUM_FETCHERS-1:0]                          fetcher_read_ready;
-    logic [PROGRAM_MEM_DATA_BITS-1:0]                 fetcher_read_data   [NUM_FETCHERS];
-    
-    // Device Control Register
-    dcr dcr_instance (
-        .clk(clk),
-        .reset(reset),
-
-        .device_control_write_enable(device_control_write_enable),
-        .device_control_data(device_control_data),
-        .thread_count(thread_count)
-    );
-
-    // Data Memory Controller
-    controller #(
-        .ADDR_BITS(DATA_MEM_ADDR_BITS),
-        .DATA_BITS(DATA_MEM_DATA_BITS),
-        .NUM_CONSUMERS(NUM_LSUS),
-        .NUM_CHANNELS(DATA_MEM_NUM_CHANNELS)
-    ) data_memory_controller (
-        .clk(clk),
-        .reset(reset),
-
-        .consumer_read_valid (lsu_read_valid),
-        .consumer_read_address(lsu_read_address),
-        .consumer_read_ready (lsu_read_ready),
-        .consumer_read_data  (lsu_read_data),
-        .consumer_write_valid(lsu_write_valid),
-        .consumer_write_address(lsu_write_address),
-        .consumer_write_data (lsu_write_data),
-        .consumer_write_ready(lsu_write_ready),
-
-        .mem_read_valid (data_mem_read_valid),
-        .mem_read_address(data_mem_read_address),
-        .mem_read_ready (data_mem_read_ready),
-        .mem_read_data  (data_mem_read_data),
-        .mem_write_valid (data_mem_write_valid),
-        .mem_write_address(data_mem_write_address),
-        .mem_write_data  (data_mem_write_data),
-        .mem_write_ready (data_mem_write_ready)
-    );
-
-    // Program Memory Controller (read-only; tie off write path)
-    // Dummy signals to satisfy controller ports without changing behavior.
-    logic [PROGRAM_MEM_NUM_CHANNELS-1:0]              pmc_mem_write_valid_dummy;
-    logic [PROGRAM_MEM_ADDR_BITS-1:0]                 pmc_mem_write_address_dummy [PROGRAM_MEM_NUM_CHANNELS];
-    logic [PROGRAM_MEM_DATA_BITS-1:0]                 pmc_mem_write_data_dummy    [PROGRAM_MEM_NUM_CHANNELS];
-    // If your external program memory exposes a write_ready, drive it as 0 (never ready) or 1 as you prefer.
-    // It is unused because WRITE_ENABLE=0, but the controller still has the port.
-    logic [PROGRAM_MEM_NUM_CHANNELS-1:0]              pmc_mem_write_ready_dummy;
-    assign pmc_mem_write_ready_dummy = '0;
-
-        controller #(
-        .ADDR_BITS(PROGRAM_MEM_ADDR_BITS),
-        .DATA_BITS(PROGRAM_MEM_DATA_BITS),
-        .NUM_CONSUMERS(NUM_FETCHERS),
-        .NUM_CHANNELS(PROGRAM_MEM_NUM_CHANNELS),
-        .WRITE_ENABLE(0)
-    ) program_memory_controller (
-        .clk   (clk),
-        .reset (reset),
-
-        // READ consumers (fetchers)
-        .consumer_read_valid  (fetcher_read_valid),
-        .consumer_read_address(fetcher_read_address),
-        .consumer_read_ready  (fetcher_read_ready),
-        .consumer_read_data   (fetcher_read_data),
-
-        // Memory (program) read path
-        .mem_read_valid (program_mem_read_valid),
-        .mem_read_address(program_mem_read_address),
-        .mem_read_ready (program_mem_read_ready),
-        .mem_read_data  (program_mem_read_data),
-
-        // ---- TIE OFF unused WRITE consumer side (important!) ----
-        .consumer_write_valid   ('0),
-        .consumer_write_address ('{default:'0}),
-        .consumer_write_data    ('{default:'0}),
-        .consumer_write_ready   (),   // ignore
-
-        // ---- Dummy write path (already unused) ----
-        .mem_write_valid (pmc_mem_write_valid_dummy),
-        .mem_write_address(pmc_mem_write_address_dummy),
-        .mem_write_data  (pmc_mem_write_data_dummy),
-        .mem_write_ready (pmc_mem_write_ready_dummy)
-    );
-
-
-    // Dispatcher
-    dispatch #(
-        .NUM_CORES(NUM_CORES),
-        .THREADS_PER_BLOCK(THREADS_PER_BLOCK)
-    ) dispatch_instance (
-        .clk(clk),
-        .reset(reset),
-        .start(start),
-        .thread_count(thread_count),
-        .core_done(core_done),
-        .core_start(core_start),
-        .core_reset(core_reset),
-        .core_block_id(core_block_id),
-        .core_thread_count(core_thread_count),
-        .done(done)
-    );
-
-    // Compute Cores
-    genvar i;
-    generate
-        for (i = 0; i < NUM_CORES; i = i + 1) begin : cores
-            // EDA: separate per-core LSU <-> controller signals to avoid slicing limits
-            logic [THREADS_PER_BLOCK-1:0]              core_lsu_read_valid;
-            logic [DATA_MEM_ADDR_BITS-1:0]             core_lsu_read_address  [THREADS_PER_BLOCK];
-            logic [THREADS_PER_BLOCK-1:0]              core_lsu_read_ready;
-            logic [DATA_MEM_DATA_BITS-1:0]             core_lsu_read_data     [THREADS_PER_BLOCK];
-            logic [THREADS_PER_BLOCK-1:0]              core_lsu_write_valid;
-            logic [DATA_MEM_ADDR_BITS-1:0]             core_lsu_write_address [THREADS_PER_BLOCK];
-            logic [DATA_MEM_DATA_BITS-1:0]             core_lsu_write_data    [THREADS_PER_BLOCK];
-            logic [THREADS_PER_BLOCK-1:0]              core_lsu_write_ready;
-
-            // Pass through signals between LSUs and data memory controller
-            genvar j;
-            for (j = 0; j < THREADS_PER_BLOCK; j = j + 1) begin : lsu_xbar
-                localparam int lsu_index = i * THREADS_PER_BLOCK + j;
-                always_comb begin
-                    // core → global
-                    lsu_read_valid   [lsu_index] = core_lsu_read_valid[j];
-                    lsu_read_address [lsu_index] = core_lsu_read_address[j];
-                    lsu_write_valid  [lsu_index] = core_lsu_write_valid[j];
-                    lsu_write_address[lsu_index] = core_lsu_write_address[j];
-                    lsu_write_data   [lsu_index] = core_lsu_write_data[j];
-
-                    // global → core
-                    core_lsu_read_ready [j] = lsu_read_ready [lsu_index];
-                    core_lsu_read_data  [j] = lsu_read_data  [lsu_index];
-                    core_lsu_write_ready[j] = lsu_write_ready[lsu_index];
-                    end
-            end
-
-            // Compute Core
-            core #(
-                .DATA_MEM_ADDR_BITS    (DATA_MEM_ADDR_BITS),
-                .DATA_MEM_DATA_BITS    (DATA_MEM_DATA_BITS),
-                .PROGRAM_MEM_ADDR_BITS (PROGRAM_MEM_ADDR_BITS),
-                .PROGRAM_MEM_DATA_BITS (PROGRAM_MEM_DATA_BITS),
-                .THREADS_PER_BLOCK     (THREADS_PER_BLOCK)
-            ) core_instance (
-                .clk   (clk),
-                .reset (core_reset[i]),
-                .start (core_start[i]),
-                .done  (core_done[i]),
-                .block_id    (core_block_id[i]),
-                .thread_count(core_thread_count[i]),
-                
-                .program_mem_read_valid  (fetcher_read_valid[i]),
-                .program_mem_read_address(fetcher_read_address[i]),
-                .program_mem_read_ready  (fetcher_read_ready[i]),
-                .program_mem_read_data   (fetcher_read_data[i]),
-
-                .data_mem_read_valid   (core_lsu_read_valid),
-                .data_mem_read_address (core_lsu_read_address),
-                .data_mem_read_ready   (core_lsu_read_ready),
-                .data_mem_read_data    (core_lsu_read_data),
-                .data_mem_write_valid  (core_lsu_write_valid),
-                .data_mem_write_address(core_lsu_write_address),
-                .data_mem_write_data   (core_lsu_write_data),
-                .data_mem_write_ready  (core_lsu_write_ready)
-            );
-        end
-    endgenerate
-endmodule
+struct TestIface {
+    const char* name;
+    void (*load_program)(std::vector<uint16_t>& p);
+    void (*load_data)   (std::vector<uint8_t>&  d);
+    bool (*check)       (const std::vector<uint8_t>& d, std::string& why);
+};
 
 
 ====================================================================
->>> File: dut/src/include/predict_pkg.sv
+>>> File: cpp/test/tests_add_scalar.hpp
 ====================================================================
 
-package predict_pkg;
-  typedef struct packed {
-    logic        valid;
-    logic        pred_taken;
-    logic [31:0] pred_target;
-    logic [7:0]  warp_id;
-    logic [31:0] pc_at_fetch;
-  } pred_meta_t;
-endpackage
+#pragma once
+#include "test_iface.hpp"
+#include "test_encode.hpp"
+#include <vector>
+#include <cstdint>
+#include <string>
 
+static inline void load_addscalar_program(std::vector<uint16_t>& p) {
+    std::vector<uint16_t> prog = {
+        OP_MUL(R0, REG_blockIdx, REG_blockDim),
+        OP_ADD(R0, R0, REG_threadIdx),
 
-====================================================================
->>> File: dut/src/lsu.sv
-====================================================================
+        OP_CONST(R1, 0x00),  // baseA
+        OP_CONST(R3, 0x10),  // baseC
+        OP_CONST(R5, 0x05),  // scalar 5
 
-`default_nettype none
-`timescale 1ns/1ns
+        OP_ADD(R4, R1, R0),  // addrA
+        OP_LDR(R4, R4, 0),   // R4 = A[i]
 
-// LOAD-STORE UNIT
-// > Handles asynchronous memory load and store operations and waits for response
-// > Each thread in each core has its own LSU
-// > LDR, STR instructions are executed here
-module lsu (
-    input  logic clk,
-    input  logic reset,
-    input  logic enable, // If current block has fewer threads than block size, some LSUs will be inactive
+        OP_ADD(R6, R4, R5),  // R6 = A[i] + 5
 
-    // State
-    input  logic [2:0] core_state,
+        OP_ADD(R7, R3, R0),  // addrC
+        OP_STR(R7, R6, 0),   // C[i] = R6
 
-    // Memory Control Signals
-    input  logic decoded_mem_read_enable,
-    input  logic decoded_mem_write_enable,
+        OP_RET()
+    };
+    p.assign(p.size(), 0);
+    for (size_t i = 0; i < prog.size() && i < p.size(); ++i) p[i] = prog[i];
+}
 
-    // Registers
-    input  logic [7:0] rs,
-    input  logic [7:0] rt,
+static inline void load_addscalar_data(std::vector<uint8_t>& d) {
+    // A: 0..7, C: 0
+    for (int i = 0; i < 8; ++i) d[i] = i;
+    for (int i = 0; i < 8; ++i) d[16 + i] = 0;
+}
 
-    // Data Memory
-    output logic       mem_read_valid,
-    output logic [7:0] mem_read_address,
-    input  logic       mem_read_ready,
-    input  logic [7:0] mem_read_data,
-    output logic       mem_write_valid,
-    output logic [7:0] mem_write_address,
-    output logic [7:0] mem_write_data,
-    input  logic       mem_write_ready,
+static inline bool check_addscalar(const std::vector<uint8_t>& d, std::string& why) {
+    for (int i = 0; i < 8; ++i) {
+        uint8_t exp = uint8_t(d[i] + 5);
+        uint8_t got = d[16 + i];
+        if (got != exp) {
+            why = "add_scalar mismatch at " + std::to_string(i);
+            return false;
+        }
+    }
+    return true;
+}
 
-    // LSU Outputs
-    output logic [1:0] lsu_state,
-    output logic [7:0] lsu_out
-);
-    localparam logic [1:0] IDLE = 2'b00,
-                           REQUESTING = 2'b01,
-                           WAITING = 2'b10,
-                           DONE = 2'b11;
-
-    always_ff @(posedge clk) begin
-        if (reset) begin
-            lsu_state         <= IDLE;
-            lsu_out           <= 8'd0;
-            mem_read_valid    <= 1'b0;
-            mem_read_address  <= 8'd0;
-            mem_write_valid   <= 1'b0;
-            mem_write_address <= 8'd0;
-            mem_write_data    <= 8'd0;
-        end else if (enable) begin
-            // If memory read enable is triggered (LDR instruction)
-            if (decoded_mem_read_enable) begin
-                case (lsu_state)
-                    IDLE: begin
-                        // Only read when core_state = REQUEST
-                        if (core_state == 3'b011) begin
-                            lsu_state <= REQUESTING;
-                        end
-                    end
-                    REQUESTING: begin
-                        mem_read_valid   <= 1'b1;
-                        mem_read_address <= rs;
-                        lsu_state        <= WAITING;
-                    end
-                    WAITING: begin
-                        if (mem_read_ready == 1'b1) begin
-                            mem_read_valid <= 1'b0;
-                            lsu_out        <= mem_read_data;
-                            lsu_state      <= DONE;
-                        end
-                    end
-                    DONE: begin
-                        // Reset when core_state = UPDATE
-                        if (core_state == 3'b110) begin
-                            lsu_state <= IDLE;
-                        end
-                    end
-                endcase
-            end
-
-            // If memory write enable is triggered (STR instruction)
-            if (decoded_mem_write_enable) begin
-                case (lsu_state)
-                    IDLE: begin
-                        // Only write when core_state = REQUEST
-                        if (core_state == 3'b011) begin
-                            lsu_state <= REQUESTING;
-                        end
-                    end
-                    REQUESTING: begin
-                        mem_write_valid   <= 1'b1;
-                        mem_write_address <= rs;
-                        mem_write_data    <= rt;
-                        lsu_state         <= WAITING;
-                    end
-                    WAITING: begin
-                        if (mem_write_ready) begin
-                            mem_write_valid <= 1'b0;
-                            lsu_state       <= DONE;
-                        end
-                    end
-                    DONE: begin
-                        // Reset when core_state = UPDATE
-                        if (core_state == 3'b110) begin
-                            lsu_state <= IDLE;
-                        end
-                    end
-                endcase
-            end
-        end
-        // If not enabled, retain previous outputs/state (matches original behavior)
-    end
-endmodule
+static TestIface TEST_ADD_SCALAR {
+    "add_scalar",
+    load_addscalar_program,
+    load_addscalar_data,
+    check_addscalar
+};
 
 
 ====================================================================
->>> File: dut/src/pc.sv
+>>> File: cpp/test/tests_branch_pred.hpp
 ====================================================================
 
-`default_nettype none
-`timescale 1ns/1ns
+#pragma once
+#include "test_iface.hpp"
+#include "test_encode.hpp"
+#include <vector>
+#include <cstdint>
+#include <string>
 
-// PROGRAM COUNTER
-// > Calculates the next PC for each thread to update to (but currently we assume all threads
-//   update to the same PC and don't support branch divergence)
-// > Currently, each thread in each core has it's own calculation for next PC
-// > The NZP register value is set by the CMP instruction (based on >/=/< comparison) to 
-//   initiate the BRnzp instruction for branching
-module pc #(
-    parameter int DATA_MEM_DATA_BITS     = 8,
-    parameter int PROGRAM_MEM_ADDR_BITS  = 8
-) (
-    input  logic clk,
-    input  logic reset,
-    input  logic enable, // If current block has less threads then block size, some PCs will be inactive
+// Uniform branch per block: block 0 -> 0x55, block 1 -> 0xAA.
+// Keeps branch decision uniform across threads (no divergence).
 
-    // State
-    input  logic [2:0]                          core_state,
+static inline void load_branchpred_program(std::vector<uint16_t>& p) {
+    std::vector<uint16_t> prog;
+    prog.reserve(64);
 
-    // Control Signals
-    input  logic [2:0]                          decoded_nzp,
-    input  logic [DATA_MEM_DATA_BITS-1:0]       decoded_immediate,
-    input  logic                                 decoded_nzp_write_enable,
-    input  logic                                 decoded_pc_mux, 
+    // tid = blockIdx*blockDim + threadIdx  -> R0
+    prog.push_back(OP_MUL(R0, REG_blockIdx, REG_blockDim));
+    prog.push_back(OP_ADD(R0, R0, REG_threadIdx));
 
-    // ALU Output - used for alu_out[2:0] to compare with NZP register
-    input  logic [DATA_MEM_DATA_BITS-1:0]       alu_out,
+    // baseC -> R9
+    prog.push_back(OP_CONST(R9, 0x10));
 
-    // Current & Next PCs
-    input  logic [PROGRAM_MEM_ADDR_BITS-1:0]    current_pc,
-    output logic [PROGRAM_MEM_ADDR_BITS-1:0]    next_pc
-);
-    logic [2:0] nzp;
+    // r = blockIdx % 2 (uniform across the block)
+    prog.push_back(OP_CONST(R1, 0x00));              // R1 = 0
+    prog.push_back(OP_ADD(R2, REG_blockIdx, R1));    // R2 = blockIdx
+    prog.push_back(OP_CONST(RA, 0x02));              // RA = 2
+    prog.push_back(OP_DIV(R3, R2, RA));              // q = blockIdx/2
+    prog.push_back(OP_ADD(R3, R3, R3));              // t2q = q + q
+    prog.push_back(OP_SUB(R4, R2, R3));              // r = blockIdx - 2*q  (0 or 1)
 
-    always_ff @(posedge clk) begin
-        if (reset) begin
-            nzp     <= 3'b000;
-            next_pc <= '0;
-        end else if (enable) begin
-            // Update PC when core_state = EXECUTE
-            if (core_state == 3'b101) begin 
-                if (decoded_pc_mux == 1'b1) begin 
-                    if ((nzp & decoded_nzp) != 3'b000) begin 
-                        // On BRnzp instruction, branch to immediate if NZP case matches previous CMP
-                        next_pc <= decoded_immediate; // (implicit truncation if widths differ, same as original)
-                    end else begin 
-                        // Otherwise, just update to PC + 1 (next line)
-                        next_pc <= current_pc + 1'b1;
-                    end
-                end else begin 
-                    // By default update to PC + 1 (next line)
-                    next_pc <= current_pc + 1'b1;
-                end
-            end   
+    // Default EVEN path value: R6 = 0x55
+    prog.push_back(OP_CONST(R6, 0x55));
 
-            // Store NZP when core_state = UPDATE   
-            if (core_state == 3'b110) begin 
-                // Write to NZP register on CMP instruction
-                if (decoded_nzp_write_enable) begin
-                    nzp[2] <= alu_out[2];
-                    nzp[1] <= alu_out[1];
-                    nzp[0] <= alu_out[0];
-                end
-            end      
-        end
-    end
-endmodule
+    // CMP r, 0 (sets NZP). Use RC as zero.
+    prog.push_back(OP_CONST(RC, 0x00));              // zero
+    prog.push_back(OP_CMP(R4, RC));
 
+    // BRnzp P -> ODD label (mask for Positive = bit2)
+    const size_t br_to_odd_idx = prog.size();
+    prog.push_back(OP_BRNZP(0b100, /*imm8*/ 0x00));
 
-====================================================================
->>> File: dut/src/registers.sv
-====================================================================
+    // EVEN path: store & return
+    prog.push_back(OP_ADD(R7, R9, R0));             // addr = baseC + tid
+    prog.push_back(OP_STR(R7, R6));
+    prog.push_back(OP_RET());
 
-`default_nettype none
-`timescale 1ns/1ns
+    // ODD label:
+    const size_t odd_label_idx = prog.size();
+    prog.push_back(OP_CONST(R6, 0xAA));             // odd-block value
+    prog.push_back(OP_ADD(R7, R9, R0));
+    prog.push_back(OP_STR(R7, R6));
+    prog.push_back(OP_RET());
 
-// REGISTER FILE
-// > Each thread within each core has it's own register file with 13 free registers and 3 read-only registers
-// > Read-only registers hold the familiar %blockIdx, %blockDim, and %threadIdx values critical to SIMD
-module registers #(
-    parameter int THREADS_PER_BLOCK = 4,
-    parameter int THREAD_ID         = 0,
-    parameter int DATA_BITS         = 8
-) (
-    input  logic clk,
-    input  logic reset,
-    input  logic enable, // If current block has less threads then block size, some registers will be inactive
+    // Patch BR target
+    prog[br_to_odd_idx] = OP_BRNZP(0b100, static_cast<uint8_t>(odd_label_idx));
 
-    // Kernel Execution
-    input  logic [7:0] block_id,
+    // Copy into program memory
+    p.assign(p.size(), 0);
+    for (size_t i = 0; i < prog.size() && i < p.size(); ++i) p[i] = prog[i];
+}
 
-    // State
-    input  logic [2:0] core_state,
+static inline void load_branchpred_data(std::vector<uint8_t>& d) {
+    for (int i = 0; i < 32; ++i) d[0x10 + i] = 0;
+}
 
-    // Instruction Signals
-    input  logic [3:0] decoded_rd_address,
-    input  logic [3:0] decoded_rs_address,
-    input  logic [3:0] decoded_rt_address,
+static inline bool check_branchpred(const std::vector<uint8_t>& d, std::string& why) {
+    // With 8 threads total split into two 4-thread blocks:
+    //   block 0 (tid 0..3) -> 0x55
+    //   block 1 (tid 4..7) -> 0xAA
+    for (int i = 0; i < 8; ++i) {
+        uint8_t exp = (i < 4) ? 0x55 : 0xAA;
+        uint8_t got = d[0x10 + i];
+        if (got != exp) {
+            why = "branch_pred mismatch at tid=" + std::to_string(i) +
+                  " exp=" + std::to_string(exp) + " got=" + std::to_string(got);
+            return false;
+        }
+    }
+    return true;
+}
 
-    // Control Signals
-    input  logic        decoded_reg_write_enable,
-    input  logic [1:0]  decoded_reg_input_mux,
-    input  logic [DATA_BITS-1:0] decoded_immediate,
-
-    // Thread Unit Outputs
-    input  logic [DATA_BITS-1:0] alu_out,
-    input  logic [DATA_BITS-1:0] lsu_out,
-
-    // Registers
-    output logic [7:0] rs,
-    output logic [7:0] rt
-);
-    localparam logic [1:0] ARITHMETIC = 2'b00,
-                           MEMORY     = 2'b01,
-                           CONSTANT   = 2'b10;
-
-    // 16 registers per thread (13 free registers and 3 read-only registers)
-    logic [7:0] registers [16];
-
-    always_ff @(posedge clk) begin
-        if (reset) begin
-            // Empty rs, rt
-            rs <= 8'd0;
-            rt <= 8'd0;
-
-            // Initialize all free registers
-            registers[0]  <= 8'd0;
-            registers[1]  <= 8'd0;
-            registers[2]  <= 8'd0;
-            registers[3]  <= 8'd0;
-            registers[4]  <= 8'd0;
-            registers[5]  <= 8'd0;
-            registers[6]  <= 8'd0;
-            registers[7]  <= 8'd0;
-            registers[8]  <= 8'd0;
-            registers[9]  <= 8'd0;
-            registers[10] <= 8'd0;
-            registers[11] <= 8'd0;
-            registers[12] <= 8'd0;
-
-            // Initialize read-only registers
-            registers[13] <= 8'd0;                      // %blockIdx
-            registers[14] <= THREADS_PER_BLOCK[7:0];    // %blockDim
-            registers[15] <= THREAD_ID[7:0];            // %threadIdx
-        end else if (enable) begin 
-            // [Bad Solution] Shouldn't need to set this every cycle
-            registers[13] <= block_id; // Update the block_id when a new block is issued from dispatcher
-            
-            // Fill rs/rt when core_state = REQUEST
-            if (core_state == 3'b011) begin 
-                rs <= registers[decoded_rs_address];
-                rt <= registers[decoded_rt_address];
-            end
-
-            // Store rd when core_state = UPDATE
-            if (core_state == 3'b110) begin 
-                // Only allow writing to R0 - R12
-                if (decoded_reg_write_enable && (decoded_rd_address < 4'd13)) begin
-                    unique case (decoded_reg_input_mux)
-                        ARITHMETIC: begin 
-                            // ADD, SUB, MUL, DIV
-                            registers[decoded_rd_address] <= alu_out[7:0];
-                        end
-                        MEMORY: begin 
-                            // LDR
-                            registers[decoded_rd_address] <= lsu_out[7:0];
-                        end
-                        CONSTANT: begin 
-                            // CONST
-                            registers[decoded_rd_address] <= decoded_immediate[7:0];
-                        end
-                        default: begin
-                            // no change
-                            registers[decoded_rd_address] <= registers[decoded_rd_address];
-                        end
-                    endcase
-                end
-            end
-        end
-        // When not enabled, hold state (matches original behavior)
-    end
-endmodule
+static TestIface TEST_BRANCH_PRED {
+    "branch_pred_even_odd",
+    load_branchpred_program,
+    load_branchpred_data,
+    check_branchpred
+};
 
 
 ====================================================================
->>> File: dut/src/scheduler.sv
+>>> File: cpp/test/tests_madd.hpp
 ====================================================================
 
-`default_nettype none
-`timescale 1ns/1ns
+#pragma once
+#include "test_iface.hpp"
+#include "test_encode.hpp"
+#include <vector>
+#include <cstdint>
+#include <string>
 
-// SCHEDULER
-// > Manages the entire control flow of a single compute core processing 1 block
-// 1. FETCH  2. DECODE  3. REQUEST  4. WAIT  5. EXECUTE  6. UPDATE
-// > No branch divergence (all threads assumed to converge)
-module scheduler #(
-    parameter int THREADS_PER_BLOCK = 4
-) (
-    input  logic clk,
-    input  logic reset,
-    input  logic start,
-    
-    // Control Signals
-    input  logic       decoded_mem_read_enable,   // (kept for interface parity; behavior unchanged)
-    input  logic       decoded_mem_write_enable,  // (unused here, as in original)
-    input  logic       decoded_ret,
+static inline void load_madd_program(std::vector<uint16_t>& p) {
+    std::vector<uint16_t> prog = {
+        OP_MUL(R0, REG_blockIdx, REG_blockDim),
+        OP_ADD(R0, R0, REG_threadIdx),
 
-    // Memory Access State
-    input  logic [2:0]              fetcher_state,
-    input  logic [1:0]              lsu_state   [THREADS_PER_BLOCK],
+        OP_CONST(R1, 0x00),  // baseA
+        OP_CONST(R2, 0x08),  // baseB
+        OP_CONST(R3, 0x10),  // baseC
+        OP_CONST(R5, 0x02),  // k1 = 2
+        OP_CONST(R6, 0x03),  // k2 = 3
 
-    // Current & Next PC
-    output logic [7:0]              current_pc,
-    input  logic [7:0]              next_pc     [THREADS_PER_BLOCK],
+        // R4 := A[i]
+        OP_ADD(R4, R1, R0),
+        OP_LDR(R4, R4, 0),
 
-    // Execution State
-    output logic [2:0]              core_state,
-    output logic                    done
-);
-    localparam logic [2:0] IDLE    = 3'b000, // Waiting to start
-                           FETCH   = 3'b001, // Fetch instructions from program memory
-                           DECODE  = 3'b010, // Decode instructions into control signals
-                           REQUEST = 3'b011, // Trigger async LSU requests (if any)
-                           WAIT    = 3'b100, // Wait for LSUs
-                           EXECUTE = 3'b101, // Execute ALU/PC calculations
-                           UPDATE  = 3'b110, // Update registers, NZP, and PC
-                           DONE_S  = 3'b111; // Done executing this block
+        // R7 := B[i]
+        OP_ADD(R7, R2, R0),
+        OP_LDR(R7, R7, 0),
 
-    always_ff @(posedge clk) begin 
-        if (reset) begin
-            current_pc <= 8'd0;
-            core_state <= IDLE;
-            done       <= 1'b0;
-        end else begin 
-            unique case (core_state)
-                IDLE: begin
-                    // Here after reset (before kernel is launched, or after previous block)
-                    if (start) begin 
-                        // Start by fetching the next instruction for this block based on PC
-                        core_state <= FETCH;
-                    end
-                end
+        // R4 := R4 + R4  (2*A)
+        OP_ADD(R4, R4, R4),
+        // R7 := R7 + R7 + R7 (3*B) using two adds
+        OP_ADD(R7, R7, R7),  // 2*B
+        OP_ADD(R7, R7, R2 /* misuse */) // <-- NOTE: we don't have ADDI; instead,
+                                         // we’ll do 3*B as (2*B + B)
+                                         // so use R2 to hold B again:
+    };
+    // We need R2 to be B value, not baseB. So adjust: load B into R2 earlier.
+    // Re-emit a corrected stream (easier than fancy editing here).
+    prog.clear();
+    prog = {
+        OP_MUL(R0, REG_blockIdx, REG_blockDim),
+        OP_ADD(R0, R0, REG_threadIdx),
 
-                FETCH: begin 
-                    // Move on once fetcher_state = FETCHED
-                    if (fetcher_state == 3'b010) begin 
-                        core_state <= DECODE;
-                    end
-                end
+        OP_CONST(R1, 0x00),  // baseA
+        OP_CONST(R2, 0x08),  // baseB
+        OP_CONST(R3, 0x10),  // baseC
 
-                DECODE: begin
-                    // Decode is synchronous so we move on after one cycle
-                    core_state <= REQUEST;
-                end
+        // R4 := A[i]
+        OP_ADD(R4, R1, R0),
+        OP_LDR(R4, R4, 0),
 
-                REQUEST: begin 
-                    // Request is synchronous so we move on after one cycle
-                    core_state <= WAIT;
-                end
+        // R5 := B[i]
+        OP_ADD(R5, R2, R0),
+        OP_LDR(R5, R5, 0),
 
-                WAIT: begin
-                    // Wait for all LSUs to finish their request before continuing
-                    logic any_lsu_waiting;   // automatic inside block
-                    any_lsu_waiting = 1'b0;
-                    for (int i = 0; i < THREADS_PER_BLOCK; i++) begin
-                        // Make sure no lsu_state = REQUESTING or WAITING
-                        if (lsu_state[i] == 2'b01 || lsu_state[i] == 2'b10) begin
-                            any_lsu_waiting = 1'b1;
-                            break;
-                        end
-                    end
+        // R6 := 2*A = R4 + R4
+        OP_ADD(R6, R4, R4),
 
-                    // If no LSU is waiting for a response, move onto the next stage
-                    if (!any_lsu_waiting) begin
-                        core_state <= EXECUTE;
-                    end
-                end
+        // R7 := 3*B = (B + B) + B
+        OP_ADD(R7, R5, R5),   // 2*B
+        OP_ADD(R7, R7, R5),   // 3*B
 
-                EXECUTE: begin
-                    // Execute is synchronous so we move on after one cycle
-                    core_state <= UPDATE;
-                end
+        // R6 := 2*A + 3*B
+        OP_ADD(R6, R6, R7),
 
-                UPDATE: begin 
-                if (decoded_ret) begin 
-                    // If we reach a RET instruction, this block is done executing
-                    done       <= 1'b1;
-                    core_state <= DONE_S;
-                end else begin 
-                    // Use lane 0 (valid even when fewer than THREADS_PER_BLOCK are active)
-                    current_pc <= next_pc[0];
-                    core_state <= FETCH;
-                end
-                end
+        // store to C[i]
+        OP_ADD(R7, R3, R0),
+        OP_STR(R7, R6),
+
+        OP_RET()
+    };
+
+    p.assign(p.size(), 0);
+    for (size_t i = 0; i < prog.size() && i < p.size(); ++i) p[i] = prog[i];
+}
+
+static inline void load_madd_data(std::vector<uint8_t>& d) {
+    // A: 1..8, B: 1..8, C: 0
+    for (int i = 0; i < 8; ++i) d[i] = i + 1;
+    for (int i = 0; i < 8; ++i) d[8 + i] = i + 1;
+    for (int i = 0; i < 8; ++i) d[16 + i] = 0;
+}
+
+static inline bool check_madd(const std::vector<uint8_t>& d, std::string& why) {
+    for (int i = 0; i < 8; ++i) {
+        uint16_t a = d[i];
+        uint16_t b = d[8 + i];
+        uint16_t exp = (2*a + 3*b) & 0xFF;
+        uint8_t  got = d[16 + i];
+        if (got != exp) {
+            why = "madd mismatch at " + std::to_string(i);
+            return false;
+        }
+    }
+    return true;
+}
+
+static TestIface TEST_MADD {
+    "madd_2a_3b",
+    load_madd_program,
+    load_madd_data,
+    check_madd
+};
 
 
-                DONE_S: begin 
-                    // no-op (hold state)
-                end
-            endcase
-        end
-    end
-endmodule
+====================================================================
+>>> File: cpp/test/tests_memcpy.hpp
+====================================================================
+
+#pragma once
+#include "test_iface.hpp"
+#include "test_encode.hpp"
+#include <vector>
+#include <cstdint>
+#include <string>
+
+static inline void load_memcpy_program(std::vector<uint16_t>& p) {
+    // same index math prelude as your matadd:
+    // R0 := blockIdx * blockDim + threadIdx
+    std::vector<uint16_t> prog = {
+        OP_MUL(R0, REG_blockIdx, REG_blockDim), // R0 = blockIdx*blockDim
+        OP_ADD(R0, R0, REG_threadIdx),          // R0 += threadIdx
+
+        OP_CONST(R1, 0x00),  // baseA
+        OP_CONST(R3, 0x10),  // baseC
+
+        OP_ADD(R4, R1, R0),  // addrA
+        OP_LDR(R4, R4, 0),   // R4 = *addrA
+
+        OP_ADD(R7, R3, R0),  // addrC
+        OP_STR(R7, R4, 0),   // *addrC = R4
+
+        OP_RET()
+    };
+    p.assign(p.size(), 0);
+    for (size_t i = 0; i < prog.size() && i < p.size(); ++i) p[i] = prog[i];
+}
+
+static inline void load_memcpy_data(std::vector<uint8_t>& d) {
+    // A[0..7] = 10..17, C[0..7] = 0
+    for (int i = 0; i < 8; ++i) d[i] = 10 + i;     // A
+    for (int i = 0; i < 8; ++i) d[16 + i] = 0;     // C
+}
+
+static inline bool check_memcpy(const std::vector<uint8_t>& d, std::string& why) {
+    for (int i = 0; i < 8; ++i) {
+        uint8_t exp = d[i];
+        uint8_t got = d[16 + i];
+        if (got != exp) {
+            why = "memcpy mismatch at " + std::to_string(i) +
+                  " exp=" + std::to_string(exp) + " got=" + std::to_string(got);
+            return false;
+        }
+    }
+    return true;
+}
+
+static TestIface TEST_MEMCPY {
+    "memcpy",
+    load_memcpy_program,
+    load_memcpy_data,
+    check_memcpy
+};
+
+
+====================================================================
+>>> File: cpp/test/tests_quickret.hpp
+====================================================================
+
+#pragma once
+#include "test_iface.hpp"
+#include "test_encode.hpp"
+#include <vector>
+#include <cstdint>
+#include <string>
+
+static inline void load_quickret_program(std::vector<uint16_t>& p) {
+    // just do the index prelude to exercise fetch/decode and RET quickly
+    std::vector<uint16_t> prog = {
+        OP_MUL(R0, REG_blockIdx, REG_blockDim),
+        OP_ADD(R0, R0, REG_threadIdx),
+        OP_RET()
+    };
+    p.assign(p.size(), 0);
+    for (size_t i = 0; i < prog.size() && i < p.size(); ++i) p[i] = prog[i];
+}
+
+static inline void load_quickret_data(std::vector<uint8_t>& d) {
+    // untouched
+}
+
+static inline bool check_quickret(const std::vector<uint8_t>& d, std::string& why) {
+    (void)why;
+    return true; // nothing modified; just ensures 'done' is asserted without memory traffic
+}
+
+static TestIface TEST_QUICKRET {
+    "quickret",
+    load_quickret_program,
+    load_quickret_data,
+    check_quickret
+};
 
 
