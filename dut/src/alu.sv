@@ -25,6 +25,36 @@ module alu (
                            MUL = 2'b10,
                            DIV = 2'b11;
 
+    covergroup cg @(posedge clk);
+    coverpoint opcode {
+        bins load  = {3'b000};
+        bins store = {3'b001};
+        bins add   = {3'b010};
+        bins others = default;
+    }
+    endgroup
+
+    cg cov = new();
+
+
+    coverpoint data {
+        bins low    = {[0:15]};     // 0–15 inclusive
+        bins mid    = {[16:127]};   // 16–127
+        bins high   = {[128:255]};  // 128–255
+    }
+
+
+    property prop_crc_valid_same;
+    @(posedge clk) disable iff (rst)
+        $rose(crc_done) |-> (crc_valid === 1'b1);
+    endproperty
+
+    ap_crc_same : assert property (prop_crc_valid_same)
+    else $error("CRC invalid when crc_done rose");
+
+    cp_crc_same : cover  property (prop_crc_valid_same);
+
+
     // Sequential update, identical behavior to original
     always_ff @(posedge clk) begin
         if (reset) begin

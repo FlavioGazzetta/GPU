@@ -12,7 +12,7 @@ echo "# Generated on $(date)" >> "$OUTPUT_FILE"
 echo "" >> "$OUTPUT_FILE"
 
 # Find and process .py, .sv, .cpp, and .hpp files, excluding sim_build
-find  cpp -type f \( -name "*.cpp" -o -name "*.hpp" -o -name "*.sv" -o -name "*.py" \) \
+find  dut -type f \( -name "*.cpp" -o -name "*.hpp" -o -name "*.sv" -o -name "*.py" \) \
     -not -path "*/sim_build/*" | sort | while read -r FILE; do
     echo "Processing $FILE ..."
     {
